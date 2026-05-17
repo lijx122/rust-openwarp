@@ -126,6 +126,24 @@ async fn sends_correct_accept_header() {
         .expect("ok");
 }
 
+#[tokio::test]
+async fn request_error_redacts_exa_api_key() {
+    let err = run_websearch(
+        &build_client(),
+        search_args("q"),
+        Some("secret-key"),
+        Some("http://127.0.0.1:1/?exaApiKey=secret-key&other=value"),
+    )
+    .await
+    .unwrap_err();
+    let msg = format!("{err:#}");
+
+    assert!(msg.contains("Exa POST"), "got: {msg}");
+    assert!(!msg.contains("secret-key"), "got: {msg}");
+    assert!(!msg.contains("exaApiKey=secret-key"), "got: {msg}");
+    assert!(!msg.contains("exaApiKey="), "got: {msg}");
+}
+
 // ---------------------------------------------------------------------------
 // SSE 解析 / 错误
 // ---------------------------------------------------------------------------

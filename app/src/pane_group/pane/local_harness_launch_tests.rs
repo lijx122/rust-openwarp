@@ -67,11 +67,14 @@ fn validate_local_harness_shell_rejects_unsupported_shells() {
 }
 
 #[test]
-fn build_local_claude_child_command_quotes_the_prompt() {
-    let command = build_local_claude_child_command("hello world");
-
-    assert!(command.starts_with("claude --session-id "));
-    assert!(command.ends_with(" --dangerously-skip-permissions 'hello world'"));
+fn build_local_claude_child_command_rejects_hidden_launch() {
+    assert_eq!(
+        build_local_claude_child_command("hello world"),
+        Err(
+            "Local Claude child harness launch is disabled for hidden panes because it requires unsafe skipped permissions."
+                .to_string()
+        )
+    );
 }
 
 #[test]

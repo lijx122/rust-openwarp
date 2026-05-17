@@ -113,7 +113,7 @@ fn claude_command(
     prompt_path: &str,
     system_prompt_path: Option<&str>,
 ) -> String {
-    let mut cmd = format!("{cli_name} --session-id {session_id} --dangerously-skip-permissions");
+    let mut cmd = format!("{cli_name} --session-id {session_id}");
     if let Some(sp_path) = system_prompt_path {
         let _ = write!(cmd, " --append-system-prompt-file '{sp_path}'");
     }
@@ -396,8 +396,7 @@ fn prepare_claude_config(
     claude_config
         .projects
         .entry(working_dir.to_string_lossy().into_owned())
-        .or_default()
-        .has_trust_dialog_accepted = true;
+        .or_default();
     if let Some(suffix) = api_key_suffix {
         let responses = claude_config
             .custom_api_key_responses
@@ -415,8 +414,7 @@ fn prepare_claude_config(
 }
 
 fn prepare_claude_settings(claude_settings_path: &Path) -> Result<()> {
-    let mut settings: ClaudeSettings = read_json_file_or_default(claude_settings_path)?;
-    settings.skip_dangerous_mode_permission_prompt = true;
+    let settings: ClaudeSettings = read_json_file_or_default(claude_settings_path)?;
     write_json_file(
         claude_settings_path,
         &settings,

@@ -619,6 +619,24 @@ pub struct SearchOutput {
     pub results: String,
 }
 
+fn redact_exa_url(url: &str) -> String {
+    url::Url::parse(url)
+        .map(|mut parsed| {
+            let pairs = parsed
+                .query_pairs()
+                .filter(|(key, _)| key != "exaApiKey")
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect::<Vec<_>>();
+            parsed.query_pairs_mut().clear().extend_pairs(pairs);
+            parsed.to_string()
+        })
+        .unwrap_or_else(|_| {
+            url.split_once('?')
+                .map(|(base, _)| base.to_owned())
+                .unwrap_or_else(|| url.to_owned())
+        })
+}
+
 const EMPTY_FALLBACK: &str = "No search results found. Please try a different query.";
 
 /// 入口:执行一次 Exa websearch。
@@ -638,6 +656,7 @@ pub async fn run_websearch(
     let url = endpoint_override
         .map(|s| s.to_owned())
         .unwrap_or_else(|| exa::endpoint_url(api_key));
+    let redacted_url = redact_exa_url(&url);
 
     let resp = client
         .post(&url)
@@ -647,7 +666,7 @@ pub async fn run_websearch(
         .json(&body)
         .send()
         .await
-        .with_context(|| format!("Exa POST {url}"))?;
+        .with_context(|| format!("Exa POST {redacted_url}"))?;
 
     let status = resp.status();
     if !status.is_success() {

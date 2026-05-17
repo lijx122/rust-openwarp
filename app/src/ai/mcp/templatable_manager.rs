@@ -247,6 +247,30 @@ impl TemplatableMCPServerManager {
             })
     }
 
+    pub fn resource(
+        &self,
+        installation_id: Option<Uuid>,
+        name: &str,
+        uri: Option<&str>,
+    ) -> Option<&rmcp::model::Resource> {
+        let candidates: Box<dyn Iterator<Item = &TemplatableMCPServerInfo>> =
+            if let Some(uuid) = installation_id {
+                Box::new(self.active_servers.get(&uuid).into_iter())
+            } else {
+                Box::new(self.active_servers.values())
+            };
+
+        candidates
+            .flat_map(|server| server.resources.iter())
+            .find(|resource| {
+                if let Some(uri) = uri {
+                    resource.uri == uri
+                } else {
+                    resource.name == name
+                }
+            })
+    }
+
     pub fn tools_for_server(&self, uuid: Uuid) -> Vec<rmcp::model::Tool> {
         self.active_servers
             .get(&uuid)

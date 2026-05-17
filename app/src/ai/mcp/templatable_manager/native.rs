@@ -1652,6 +1652,26 @@ impl TemplatableMCPServerManager {
         }
     }
 
+    /// Returns a reconnecting peer for a server with the given installation ID and resource URI.
+    ///
+    /// The returned peer will automatically reconnect if the underlying transport is closed.
+    pub fn server_with_installation_id_and_resource_uri(
+        &self,
+        installation_id: Uuid,
+        resource_uri: String,
+    ) -> Option<crate::ai::mcp::reconnecting_peer::ReconnectingPeer> {
+        let spawner = self.spawner.as_ref()?;
+        let server = self.active_servers.get(&installation_id)?;
+        if server.resources.iter().any(|resource| resource.uri == resource_uri) {
+            Some(crate::ai::mcp::reconnecting_peer::ReconnectingPeer::new(
+                installation_id,
+                spawner.clone(),
+            ))
+        } else {
+            None
+        }
+    }
+
     fn spawn_file_based_servers(
         &mut self,
         installations: &[TemplatableMCPServerInstallation],

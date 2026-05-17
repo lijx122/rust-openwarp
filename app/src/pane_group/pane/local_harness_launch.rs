@@ -1,7 +1,6 @@
 use std::{collections::HashMap, ffi::OsString, path::PathBuf};
 
 use shell_words::quote as shell_quote;
-use uuid::Uuid;
 use warp_cli::agent::Harness;
 use warp_managed_secrets::ManagedSecretValue;
 
@@ -41,14 +40,12 @@ pub(super) fn validate_local_harness_shell(shell_type: Option<ShellType>) -> Res
     }
 }
 
-pub(super) fn build_local_claude_child_command(prompt: &str) -> String {
-    let session_id = Uuid::new_v4();
-    let quoted_prompt = shell_quote(prompt);
-    // Local child harness panes are launched off-screen. We intentionally skip
-    // Claude's own permission prompts here so the child can start unattended
-    // instead of hanging on an approval UI the user cannot see in that hidden
-    // pane.
-    format!("claude --session-id {session_id} --dangerously-skip-permissions {quoted_prompt}")
+pub(super) fn build_local_claude_child_command(prompt: &str) -> Result<String, String> {
+    let _ = prompt;
+    Err(
+        "Local Claude child harness launch is disabled for hidden panes because it requires unsafe skipped permissions."
+            .to_string(),
+    )
 }
 
 pub(super) fn build_local_opencode_child_command(prompt: &str) -> String {
@@ -86,30 +83,10 @@ pub(super) async fn prepare_local_harness_child_launch(
         Harness::Oz => unreachable!("normalize_local_child_harness filters out Oz"),
         Harness::Unknown => unreachable!("normalize_local_child_harness filters out Unknown"),
         Harness::Claude => {
-            let working_dir = startup_directory
-                .or_else(|| std::env::current_dir().ok())
-                .ok_or_else(|| {
-                    "Could not resolve a working directory for the local Claude child.".to_string()
-                })?;
-            let claude_harness = ClaudeHarness;
-            claude_harness
-                .validate()
-                .map_err(|error: AgentDriverError| error.to_string())?;
-            // Local child harness panes inherit the user's existing local Claude
-            // auth/session state. We still prepare Claude's config files here,
-            // but there are no Warp-managed secrets to materialize into the
-            // hidden child pane.
-            let managed_secrets: HashMap<String, ManagedSecretValue> = HashMap::new();
-            claude_harness
-                .prepare_environment_config(&working_dir, None, &managed_secrets)
-                .map_err(|error: AgentDriverError| error.to_string())?;
-            if let Some(manager) = plugin_manager_for(claude_harness.cli_agent()) {
-                if let Err(error) = manager.install().await {
-                    log::warn!("Claude plugin installation failed for child harness: {error}");
-                }
-            }
-
-            build_local_claude_child_command(&prompt)
+            return Err(
+                "Local Claude child harness launch is disabled for hidden panes because it requires unsafe skipped permissions."
+                    .to_string(),
+            )
         }
         Harness::OpenCode => {
             validate_cli_installed("opencode", Some("https://opencode.ai/docs"))

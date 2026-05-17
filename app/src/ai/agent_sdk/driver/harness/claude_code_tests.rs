@@ -69,8 +69,8 @@ fn claude_command_pipes_prompt_path() {
         "expected single-quoted stdin redirect of the prompt path, got: {cmd}"
     );
     assert!(
-        cmd.contains("--dangerously-skip-permissions"),
-        "expected --dangerously-skip-permissions, got: {cmd}"
+        !cmd.contains("--dangerously-skip-permissions"),
+        "did not expect --dangerously-skip-permissions, got: {cmd}"
     );
 }
 
@@ -283,7 +283,7 @@ fn prepare_claude_config_creates_config_file_without_api_suffix() {
     let working_dir_key = working_dir.to_string_lossy().to_string();
     assert_eq!(
         claude_config["projects"][working_dir_key]["hasTrustDialogAccepted"],
-        Value::Bool(true)
+        Value::Null
     );
     assert_eq!(claude_config.get("customApiKeyResponses"), None);
 }
@@ -350,7 +350,7 @@ fn prepare_claude_config_merges_existing_config() {
     let working_dir_key = working_dir.to_string_lossy().to_string();
     assert_eq!(
         claude_config["projects"][working_dir_key]["hasTrustDialogAccepted"],
-        Value::Bool(true)
+        Value::Null
     );
 }
 
@@ -488,7 +488,7 @@ fn prepare_claude_settings_creates_settings_file() {
         serde_json::from_slice(&fs::read(claude_settings_path).unwrap()).unwrap();
     assert_eq!(
         claude_settings["skipDangerousModePermissionPrompt"],
-        Value::Bool(true)
+        Value::Null
     );
 }
 
@@ -510,6 +510,6 @@ fn prepare_claude_settings_merges_existing_settings() {
     assert_eq!(claude_settings["nested"]["value"], 1);
     assert_eq!(
         claude_settings["skipDangerousModePermissionPrompt"],
-        Value::Bool(true)
+        Value::Null
     );
 }

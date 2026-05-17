@@ -1,0 +1,90 @@
+name: Security Validation
+
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CHANNEL: oss
+  RELEASE_TAG: v0.2026.05.18.0000.oss_01
+
+jobs:
+  linux_targeted_tests:
+    name: Linux targeted tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - uses: ./.github/actions/prepare_environment
+        with:
+          target_os: linux
+          is_self_hosted: false
+          install_test_deps: true
+
+      - name: Run local_harness_launch tests
+        run: cargo test --package warp --lib local_harness_launch_tests
+        shell: bash
+
+      - name: Run websearch tests
+        run: cargo test --package warp --lib websearch_tests
+        shell: bash
+
+      - name: Run claude_code tests
+        run: cargo test --package warp --lib claude_code_tests
+        shell: bash
+
+      - name: Run mcp tests
+        run: cargo test --package warp --lib mcp_tests
+        shell: bash
+
+  windows_build:
+    name: Windows build artifact
+    runs-on: windows-latest
+    needs: linux_targeted_tests
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - uses: ./.github/actions/prepare_environment
+        with:
+          target_os: windows
+          cache_key: x64
+          is_self_hosted: false
+          install_release_deps: true
+
+      - name: Check Windows oss compile
+        run: script/bundle -Channel $CHANNEL -release-tag $RELEASE_TAG -check-only --arch x64
+        shell: bash
+
+      - name: Build Windows binary
+        id: build_binary
+        run: script/bundle -Channel $CHANNEL -release-tag $RELEASE_TAG -skip_build_installer --arch x64
+        shell: bash
+
+      - name: Build Windows installer
+        id: bundle_app
+        run: script/bundle -Channel $CHANNEL -release-tag $RELEASE_TAG -skip_build_binary --arch x64
+        shell: bash
+
+      - name: Upload Windows installer artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: openwarp-windows-x64
+          path: ${{ steps.bundle_app.outputs.installer_path }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Windows binary artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: openwarp-windows-x64-binary
+          path: ${{ steps.build_binary.outputs.binary_path }}
+          if-no-files-found: error
+          retention-days: 7

@@ -89,7 +89,7 @@ impl ReadMCPResourceExecutor {
             let AIAgentAction {
                 action:
                     AIAgentActionType::ReadMCPResource {
-                        server_id: _,
+                        server_id,
                         name,
                         uri,
                     },
@@ -101,14 +101,7 @@ impl ReadMCPResourceExecutor {
 
             let templatable_mcp_client = TemplatableMCPServerManager::as_ref(ctx);
 
-            let resource = match uri {
-                Some(uri) => templatable_mcp_client
-                    .resources()
-                    .find(|resource| &resource.uri == uri),
-                None => templatable_mcp_client
-                    .resources()
-                    .find(|resource| &resource.name == name),
-            };
+            let resource = templatable_mcp_client.resource(*server_id, name.as_str(), uri.as_deref());
 
             let Some(resource) = resource else {
                 return ActionExecution::Sync(AIAgentActionResultType::ReadMCPResource(
@@ -118,8 +111,14 @@ impl ReadMCPResourceExecutor {
 
             let uri = resource.uri.clone();
 
-            let Some(reconnecting_peer) = templatable_mcp_client.server_with_resource(resource)
-            else {
+            let reconnecting_peer = if let Some(installation_id) = server_id {
+                templatable_mcp_client
+                    .server_with_installation_id_and_resource_uri(*installation_id, uri.clone())
+            } else {
+                templatable_mcp_client.server_with_resource(resource)
+            };
+
+            let Some(reconnecting_peer) = reconnecting_peer else {
                 return ActionExecution::Sync(AIAgentActionResultType::ReadMCPResource(
                     ReadMCPResourceResult::Error("MCP server for resource not found".to_owned()),
                 ));

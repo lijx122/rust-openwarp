@@ -7,15 +7,15 @@
 //!
 //! ## 命名约定
 //!
-//! OpenAI function 名: `mcp__<server_name_safe>__<tool_name>`
+//! OpenAI function 名: `mcp__<server_id>__<tool_name>`
 //! - 双下划线分隔,避免与内置 tool 名(下划线分词)冲突
-//! - server_name_safe = server.name 中所有非 `[a-zA-Z0-9_-]` 字符替换为 `_`
+//! - `server_id` 直接使用 MCP context 中的稳定标识,避免 sanitize(name) 碰撞
 //!
 //! ## 反向解析
 //!
 //! 看到 `mcp__` 前缀名时:
-//! 1. 拆出 `server_name_safe` 和 `tool_name`
-//! 2. 在 `params.mcp_context.servers` 中按 sanitize 后的 name 匹配,拿 server.id
+//! 1. 拆出 `server_id` 和 `tool_name`
+//! 2. 在 `params.mcp_context.servers` 中按 id 精确匹配
 //! 3. 构造 `Message::ToolCall::CallMcpTool { name: tool_name, args, server_id }`
 //!
 //! ## Result 序列化
@@ -35,28 +35,9 @@ const SEP: &str = "__";
 /// 读 MCP resource 的统一函数名(uri 跨 server,语义上是单一 tool)。
 const READ_RESOURCE_NAME: &str = "mcp_read_resource";
 
-/// 把 server.name 转成可作为 OpenAI function name 一部分的安全字符串。
-fn sanitize_server_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 /// 给一条 MCP tool 生成 OpenAI function 名。
 pub fn function_name(server: &MCPServer, tool_name: &str) -> String {
-    format!(
-        "{}{}{}{}",
-        PREFIX,
-        sanitize_server_name(&server.name),
-        SEP,
-        tool_name
-    )
+    format!("{PREFIX}{}{SEP}{}", server.id, tool_name)
 }
 
 /// 判断给定 OpenAI function name 是否是 MCP 调用(含动态 mcp__ 前缀工具调用
@@ -74,7 +55,7 @@ pub fn is_mcp_function(name: &str) -> bool {
 /// 原因:Anthropic 明确警告任何 tools 字段改动 → 所有缓存层全失效。
 /// `ctx.servers` 上游依赖(`MCPContext.servers: Vec<MCPServer>`)本身不保证顺序
 /// (从 HashMap iterate / 进程启动顺序 / 并发连接都会让跨请求顺序漂移)。
-/// 这里按 `function_name`(包含 server.name 与 tool.name)字典序排序以该锁,
+/// 这里按 `function_name`(包含 server.id 与 tool.name)字典序排序以该锁,
 /// 最后追加 `mcp_read_resource`(固定名不参与排序)。
 pub fn build_mcp_tool_defs(ctx: &MCPContext) -> Vec<(String, String, Value)> {
     let mut out = Vec::new();
@@ -95,13 +76,8 @@ pub fn build_mcp_tool_defs(ctx: &MCPContext) -> Vec<(String, String, Value)> {
             out.push((function_name(server, &tool.name), prefixed_desc, schema));
         }
     }
-    // P0-3:按 function_name 字典序排序,保证跨请求同一静态上下文产出顺序
-    // 一致。function_name 全局唯一(`mcp__<server_safe>__<tool>`),作为排序键
-    // 不会有冲突。
     out.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // 仅在有任意 server 暴露 resources 时才注入 read_resource tool,避免
-    // 模型空发(可读列表是 server 决定的)。
     let any_resources = ctx.servers.iter().any(|s| !s.resources.is_empty());
     if any_resources {
         let mut available_uris: Vec<String> = Vec::new();
@@ -110,8 +86,6 @@ pub fn build_mcp_tool_defs(ctx: &MCPContext) -> Vec<(String, String, Value)> {
                 available_uris.push(format!("[{}] {} ({})", s.name, r.name, r.uri));
             }
         }
-        // P0-3:available_uris 依赖 ctx.servers 顺序 × server.resources 顺序,
-        // 同样需要跨请求稳定。按字面字典序排序,避免 HashMap iterate 顺序漂移。
         available_uris.sort();
         let desc = format!(
             "读取 MCP server 暴露的资源(文件 / 数据库 / API 等)。\
@@ -125,9 +99,9 @@ pub fn build_mcp_tool_defs(ctx: &MCPContext) -> Vec<(String, String, Value)> {
                     "type": "string",
                     "description": "资源 URI(从可用资源列表中选)。"
                 },
-                "server": {
+                "server_id": {
                     "type": "string",
-                    "description": "可选: 资源所属 MCP server 的 name(会按 sanitize 规则匹配)。当多个 server 暴露同名 uri 时必填。"
+                    "description": "可选: 资源所属 MCP server 的稳定 id。当多个 server 暴露同名 uri 时应传此字段。"
                 }
             },
             "required": ["uri"],
@@ -153,7 +127,7 @@ pub fn parse_mcp_tool_call(
     let body = function_name
         .strip_prefix(PREFIX)
         .ok_or_else(|| anyhow!("not an MCP function name"))?;
-    let (server_name_safe, tool_name) = body
+    let (server_id, tool_name) = body
         .split_once(SEP)
         .ok_or_else(|| anyhow!("malformed MCP function name (missing __): {function_name}"))?;
 
@@ -161,10 +135,9 @@ pub fn parse_mcp_tool_call(
     let server = ctx
         .servers
         .iter()
-        .find(|s| sanitize_server_name(&s.name) == server_name_safe)
-        .ok_or_else(|| anyhow!("MCP server `{server_name_safe}` not in current mcp_context"))?;
+        .find(|s| s.id == server_id)
+        .ok_or_else(|| anyhow!("MCP server `{server_id}` not in current mcp_context"))?;
 
-    // args: JSON object → prost_types::Struct
     let parsed: Value = if arguments_json.trim().is_empty() {
         json!({})
     } else {
@@ -212,6 +185,8 @@ fn json_value_to_prost(v: &Value) -> prost_types::Value {
 struct ReadResourceArgs {
     uri: String,
     #[serde(default)]
+    server_id: Option<String>,
+    #[serde(default)]
     server: Option<String>,
 }
 
@@ -220,28 +195,32 @@ fn parse_read_resource(
     ctx: Option<&MCPContext>,
 ) -> Result<api::message::tool_call::Tool> {
     let parsed: ReadResourceArgs = serde_json::from_str(arguments_json)?;
-    // 解析 server_id:
-    // 1) 若给了 server 名,按 sanitize 后匹配
-    // 2) 否则在所有 server 中找含此 uri 的 resource(命中第一个)
-    // 3) 兜底 server_id 为空(server 端按 uri 自己定位)
     let server_id = if let Some(ctx) = ctx {
-        match parsed.server.as_deref() {
-            Some(name) => ctx
-                .servers
-                .iter()
-                .find(|s| sanitize_server_name(&s.name) == sanitize_server_name(name))
-                .map(|s| s.id.clone())
-                .unwrap_or_default(),
-            None => ctx
-                .servers
-                .iter()
-                .find(|s| {
-                    s.resources
-                        .iter()
-                        .any(|r| r.uri.as_str() == parsed.uri.as_str())
-                })
-                .map(|s| s.id.clone())
-                .unwrap_or_default(),
+        if let Some(server_id) = parsed.server_id {
+            if ctx.servers.iter().any(|s| s.id == server_id) {
+                server_id
+            } else {
+                String::new()
+            }
+        } else {
+            match parsed.server.as_deref() {
+                Some(name) => ctx
+                    .servers
+                    .iter()
+                    .find(|s| s.name == name)
+                    .map(|s| s.id.clone())
+                    .unwrap_or_default(),
+                None => ctx
+                    .servers
+                    .iter()
+                    .find(|s| {
+                        s.resources
+                            .iter()
+                            .any(|r| r.uri.as_str() == parsed.uri.as_str())
+                    })
+                    .map(|s| s.id.clone())
+                    .unwrap_or_default(),
+            }
         }
     } else {
         String::new()
@@ -259,12 +238,13 @@ pub fn serialize_outgoing_read_resource(
     tc: &api::message::tool_call::ReadMcpResource,
     ctx: Option<&MCPContext>,
 ) -> (String, String) {
-    let server_name = ctx
+    let server_id = ctx
         .and_then(|c| c.servers.iter().find(|s| s.id == tc.server_id))
-        .map(|s| s.name.clone());
+        .map(|s| s.id.clone())
+        .or_else(|| (!tc.server_id.is_empty()).then(|| tc.server_id.clone()));
     let mut args = json!({ "uri": tc.uri });
-    if let Some(name) = server_name {
-        args["server"] = json!(name);
+    if let Some(server_id) = server_id {
+        args["server_id"] = json!(server_id);
     }
     (READ_RESOURCE_NAME.to_owned(), args.to_string())
 }
@@ -274,13 +254,11 @@ pub fn serialize_outgoing_call(
     tc: &api::message::tool_call::CallMcpTool,
     ctx: Option<&MCPContext>,
 ) -> (String, String) {
-    // 找回对应 server.name(若 mcp_context 已变,fallback 到 server_id)
-    let server_name = ctx
+    let server_id = ctx
         .and_then(|c| c.servers.iter().find(|s| s.id == tc.server_id))
-        .map(|s| sanitize_server_name(&s.name))
+        .map(|s| s.id.clone())
         .unwrap_or_else(|| tc.server_id.clone());
-    let name = format!("{PREFIX}{server_name}{SEP}{}", tc.name);
-    // args (Option<prost_types::Struct>) → serde_json
+    let name = format!("{PREFIX}{server_id}{SEP}{}", tc.name);
     let args_value = tc
         .args
         .as_ref()
@@ -322,7 +300,6 @@ pub fn serialize_result(result: &api::message::tool_call_result::Result) -> Opti
         let value = match &r.result {
             Some(McpR::Success(s)) => json!({
                 "status": "ok",
-                // s.content 是 Vec<rmcp Content> 类型,此处简化为 debug 字符串。
                 "content": format!("{:?}", s),
             }),
             Some(McpR::Error(e)) => json!({ "status": "error", "message": e.message }),
@@ -334,7 +311,6 @@ pub fn serialize_result(result: &api::message::tool_call_result::Result) -> Opti
         let value = match &r.result {
             Some(ReadR::Success(s)) => json!({
                 "status": "ok",
-                // contents 是 Vec<rmcp ResourceContents>,debug 序列化保留所有信息
                 "contents": format!("{:?}", s.contents),
             }),
             Some(ReadR::Error(e)) => json!({ "status": "error", "message": e.message }),
