@@ -637,6 +637,12 @@ fn redact_exa_url(url: &str) -> String {
         })
 }
 
+fn sanitize_exa_error_message(message: &str, raw_url: &str, redacted_url: &str) -> String {
+    message
+        .replace(raw_url, redacted_url)
+        .replace("exaApiKey=", "")
+}
+
 const EMPTY_FALLBACK: &str = "No search results found. Please try a different query.";
 
 /// 入口:执行一次 Exa websearch。
@@ -666,7 +672,12 @@ pub async fn run_websearch(
         .json(&body)
         .send()
         .await
-        .with_context(|| format!("Exa POST {redacted_url}"))?;
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "Exa POST {redacted_url}: {}",
+                sanitize_exa_error_message(&err.to_string(), &url, &redacted_url)
+            )
+        })?;
 
     let status = resp.status();
     if !status.is_success() {
