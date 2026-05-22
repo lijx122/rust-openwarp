@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use repo_metadata::RepoMetadataModel;
 use warp_core::ui::theme::color::internal_colors;
 use warp_core::{send_telemetry_from_ctx, ui::Icon};
 use warp_util::path::LineAndColumnArg;
@@ -45,10 +46,11 @@ use crate::workspace::view::global_search::view::{
 };
 use crate::workspace::view::{
     LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME, LEFT_PANEL_GLOBAL_SEARCH_BINDING_NAME,
-    LEFT_PANEL_PROJECT_EXPLORER_BINDING_NAME, LEFT_PANEL_SKILL_MANAGER_BINDING_NAME,
-    LEFT_PANEL_SSH_MANAGER_BINDING_NAME, LEFT_PANEL_WARP_DRIVE_BINDING_NAME,
-    OPEN_GLOBAL_SEARCH_BINDING_NAME, TOGGLE_CONVERSATION_LIST_VIEW_BINDING_NAME,
-    TOGGLE_PROJECT_EXPLORER_BINDING_NAME, TOGGLE_WARP_DRIVE_BINDING_NAME,
+    LEFT_PANEL_PROJECT_EXPLORER_BINDING_NAME, LEFT_PANEL_REMOTE_FILES_BINDING_NAME,
+    LEFT_PANEL_SKILL_MANAGER_BINDING_NAME, LEFT_PANEL_SSH_MANAGER_BINDING_NAME,
+    LEFT_PANEL_WARP_DRIVE_BINDING_NAME, OPEN_GLOBAL_SEARCH_BINDING_NAME,
+    TOGGLE_CONVERSATION_LIST_VIEW_BINDING_NAME, TOGGLE_PROJECT_EXPLORER_BINDING_NAME,
+    TOGGLE_WARP_DRIVE_BINDING_NAME,
 };
 use crate::{
     appearance::Appearance,
@@ -75,6 +77,7 @@ struct MouseStateHandles {
     warp_drive_button: MouseStateHandle,
     conversation_list_view_button: MouseStateHandle,
     ssh_manager_button: MouseStateHandle,
+    remote_files_button: MouseStateHandle,
     skill_manager_button: MouseStateHandle,
 }
 
@@ -85,6 +88,7 @@ pub enum LeftPanelAction {
     WarpDrive,
     ConversationListView,
     SshManager,
+    RemoteFiles,
     SkillManager,
 }
 
@@ -127,6 +131,7 @@ pub enum ToolPanelView {
     WarpDrive,
     ConversationListView,
     SshManager,
+    RemoteFiles,
     SkillManager,
 }
 
@@ -195,6 +200,7 @@ pub struct LeftPanelView {
     warp_drive_view: ViewHandle<DrivePanel>,
     conversation_list_view: ViewHandle<ConversationListView>,
     ssh_manager_view: ViewHandle<SshManagerPanel>,
+    remote_files_view: ViewHandle<FileTreeView>,
     skill_manager_view: ViewHandle<SkillManagerPanel>,
     active_view: active_view_state::ActiveViewState,
     toolbelt_buttons: Vec<ToolbeltButtonConfig>,
@@ -242,9 +248,22 @@ impl LeftPanelView {
         let conversation_list_view = ctx.add_typed_action_view(ConversationListView::new);
         let active_view = views.first().copied().unwrap_or(ToolPanelView::WarpDrive);
         let ssh_manager_view = ctx.add_typed_action_view(SshManagerPanel::new);
+        let remote_files_view = ctx.add_typed_action_view(FileTreeView::new);
         let skill_manager_view = ctx.add_typed_action_view(SkillManagerPanel::new);
         ctx.subscribe_to_view(&ssh_manager_view, |me, _, event, ctx| {
             me.handle_ssh_manager_event(event, ctx);
+        });
+        #[cfg(feature = "local_fs")]
+        remote_files_view.update(ctx, |view, ctx| {
+            view.set_enablement_state(
+                CodingPanelEnablementState::RemoteSession {
+                    has_remote_server: false,
+                },
+                ctx,
+            );
+        });
+        ctx.subscribe_to_view(&remote_files_view, |me, _, event, ctx| {
+            me.handle_file_tree_event(event, ctx);
         });
         ssh_manager_view.update(ctx, |view, ctx| {
             view.set_is_active(active_view == ToolPanelView::SshManager, ctx);
@@ -351,6 +370,10 @@ impl LeftPanelView {
             }
         });
 
+        ctx.subscribe_to_model(&RepoMetadataModel::handle(ctx), |me, _, _, ctx| {
+            me.sync_remote_file_tree_roots(ctx);
+        });
+
         let mut view = Self {
             resizable_state_handle,
             mouse_state_handles: Default::default(),
@@ -358,6 +381,7 @@ impl LeftPanelView {
             warp_drive_view,
             conversation_list_view,
             ssh_manager_view,
+            remote_files_view,
             skill_manager_view,
             active_view: active_view_state::new(active_view),
             toolbelt_buttons,
@@ -366,6 +390,7 @@ impl LeftPanelView {
             is_agent_management_view_open: false,
             panel_position: super::PanelPosition::Left,
         };
+        view.sync_remote_file_tree_roots(ctx);
         view.update_button_active_states();
 
         view
@@ -399,6 +424,7 @@ impl LeftPanelView {
             match (v, &current_view) {
                 (ToolPanelView::GlobalSearch { .. }, ToolPanelView::GlobalSearch { .. }) => true,
                 (ToolPanelView::SshManager, ToolPanelView::SshManager) => true,
+                (ToolPanelView::RemoteFiles, ToolPanelView::RemoteFiles) => true,
                 (ToolPanelView::SkillManager, ToolPanelView::SkillManager) => true,
                 _ => std::mem::discriminant(v) == std::mem::discriminant(&current_view),
             }
@@ -500,6 +526,18 @@ impl LeftPanelView {
                     active_icon: None,
                     tooltip_text: crate::t!("workspace-left-panel-ssh-manager"),
                     action: LeftPanelAction::SshManager,
+                    render_with_active_state: false,
+                    tooltip_keybinding: toolbelt_tooltip_keybinding(&tooltip_keybinding_names, ctx),
+                    tooltip_keybinding_names,
+                }
+            }
+            ToolPanelView::RemoteFiles => {
+                let tooltip_keybinding_names = vec![LEFT_PANEL_REMOTE_FILES_BINDING_NAME];
+                ToolbeltButtonConfig {
+                    icon: Icon::Cloud,
+                    active_icon: None,
+                    tooltip_text: crate::t!("workspace-left-panel-remote-files"),
+                    action: LeftPanelAction::RemoteFiles,
                     render_with_active_state: false,
                     tooltip_keybinding: toolbelt_tooltip_keybinding(&tooltip_keybinding_names, ctx),
                     tooltip_keybinding_names,
@@ -762,6 +800,9 @@ impl LeftPanelView {
             ToolPanelView::SshManager => {
                 ctx.focus(&self.ssh_manager_view);
             }
+            ToolPanelView::RemoteFiles => {
+                ctx.focus(&self.remote_files_view);
+            }
             ToolPanelView::SkillManager => {
                 ctx.focus(&self.skill_manager_view);
             }
@@ -894,6 +935,24 @@ impl LeftPanelView {
             }
         }
     }
+
+    fn sync_remote_file_tree_roots(&mut self, ctx: &mut ViewContext<Self>) {
+        #[cfg(feature = "local_fs")]
+        {
+            let remote_roots: Vec<_> = RepoMetadataModel::as_ref(ctx)
+                .remote_repository_ids(ctx)
+                .cloned()
+                .collect();
+            let enablement = CodingPanelEnablementState::RemoteSession {
+                has_remote_server: !remote_roots.is_empty(),
+            };
+
+            self.remote_files_view.update(ctx, |view, ctx| {
+                view.set_enablement_state(enablement, ctx);
+                view.set_remote_root_directories(&remote_roots, ctx);
+            });
+        }
+    }
 }
 
 impl Entity for LeftPanelView {
@@ -951,6 +1010,9 @@ impl LeftPanelView {
                     self.active_view.get() == ToolPanelView::ConversationListView
                 }
                 LeftPanelAction::SshManager => self.active_view.get() == ToolPanelView::SshManager,
+                LeftPanelAction::RemoteFiles => {
+                    self.active_view.get() == ToolPanelView::RemoteFiles
+                }
                 LeftPanelAction::SkillManager => {
                     self.active_view.get() == ToolPanelView::SkillManager
                 }
@@ -1098,6 +1160,10 @@ impl LeftPanelView {
             LeftPanelAction::SshManager => {
                 active_view_state::set(self, ToolPanelView::SshManager, ctx);
             }
+            LeftPanelAction::RemoteFiles => {
+                active_view_state::set(self, ToolPanelView::RemoteFiles, ctx);
+                self.sync_remote_file_tree_roots(ctx);
+            }
             LeftPanelAction::SkillManager => {
                 active_view_state::set(self, ToolPanelView::SkillManager, ctx);
             }
@@ -1141,6 +1207,8 @@ impl LeftPanelView {
             && self.active_view.get() == ToolPanelView::ProjectExplorer;
         let is_ssh_visible = active_pane_group.as_ref(ctx).left_panel_open
             && self.active_view.get() == ToolPanelView::SshManager;
+        let is_remote_files_visible = active_pane_group.as_ref(ctx).left_panel_open
+            && self.active_view.get() == ToolPanelView::RemoteFiles;
 
         if let Some(file_tree_view) = self
             .working_directories_model
@@ -1155,6 +1223,9 @@ impl LeftPanelView {
         self.ssh_manager_view.update(ctx, |view, ctx| {
             view.set_is_active(is_ssh_visible, ctx);
             view.set_file_tree_is_active(is_ssh_visible, ctx);
+        });
+        self.remote_files_view.update(ctx, |view, ctx| {
+            view.set_is_active(is_remote_files_visible, ctx);
         });
     }
 
@@ -1208,6 +1279,7 @@ impl View for LeftPanelView {
                 ToolPanelView::WarpDrive => ctx.focus(&self.warp_drive_view),
                 ToolPanelView::ConversationListView => ctx.focus(&self.conversation_list_view),
                 ToolPanelView::SshManager => ctx.focus(&self.ssh_manager_view),
+                ToolPanelView::RemoteFiles => ctx.focus(&self.remote_files_view),
                 ToolPanelView::SkillManager => ctx.focus(&self.skill_manager_view),
             }
         }
@@ -1224,6 +1296,7 @@ impl View for LeftPanelView {
                 .conversation_list_view_button
                 .clone(),
             self.mouse_state_handles.ssh_manager_button.clone(),
+            self.mouse_state_handles.remote_files_button.clone(),
             self.mouse_state_handles.skill_manager_button.clone(),
         ];
 
@@ -1286,6 +1359,14 @@ impl View for LeftPanelView {
             ToolPanelView::SshManager => Shrinkable::new(
                 1.0,
                 Container::new(ChildView::new(&self.ssh_manager_view).finish())
+                    .with_padding_left(2.)
+                    .with_padding_right(2.)
+                    .finish(),
+            )
+            .finish(),
+            ToolPanelView::RemoteFiles => Shrinkable::new(
+                1.0,
+                Container::new(ChildView::new(&self.remote_files_view).finish())
                     .with_padding_left(2.)
                     .with_padding_right(2.)
                     .finish(),

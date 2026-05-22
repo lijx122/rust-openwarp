@@ -293,16 +293,6 @@ impl RepoMetadataModel {
     ) {
         self.remote.update(ctx, |remote, ctx| {
             remote.insert_from_snapshot(host_id.clone(), update, ctx);
-            let new_len = remote
-                .remote_repository_ids()
-                .filter(|id| id.host_id == host_id)
-                .count();
-            tracing::info!(
-                target: "repo_metadata_remote_roots",
-                host_id = ?host_id,
-                new_len,
-                "remote_roots updated for host_id={host_id:?}, new_len={new_len}"
-            );
         });
     }
 

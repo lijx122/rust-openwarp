@@ -1427,14 +1427,6 @@ fn initialize_app(
                 let mgr = RemoteServerManager::handle(ctx);
                 ctx.subscribe_to_model(&mgr, |me, event, ctx| match event {
                     RemoteServerManagerEvent::RepoMetadataSnapshot { host_id, update } => {
-                        tracing::info!(
-                            target: "repo_metadata_snapshot",
-                            host_id = ?host_id,
-                            repo_path = ?update.repo_path,
-                            root_count = update.update_entries.len(),
-                            "RepoMetadataSnapshot received, root_count={:?}",
-                            update.update_entries.len()
-                        );
                         me.insert_remote_snapshot(host_id.clone(), update, ctx);
                     }
                     RemoteServerManagerEvent::RepoMetadataUpdated { host_id, update }

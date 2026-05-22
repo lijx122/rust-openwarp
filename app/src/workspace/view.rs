@@ -577,6 +577,7 @@ pub(crate) const LEFT_PANEL_WARP_DRIVE_BINDING_NAME: &str = "workspace:left_pane
 pub(crate) const LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME: &str =
     "workspace:left_panel_agent_conversations";
 pub(crate) const LEFT_PANEL_SSH_MANAGER_BINDING_NAME: &str = "workspace:left_panel_ssh_manager";
+pub(crate) const LEFT_PANEL_REMOTE_FILES_BINDING_NAME: &str = "workspace:left_panel_remote_files";
 pub(crate) const LEFT_PANEL_SKILL_MANAGER_BINDING_NAME: &str = "workspace:left_panel_skill_manager";
 
 const KEYBINDINGS_TO_CACHE: [&str; 4] = [
@@ -3516,6 +3517,7 @@ impl Workspace {
                 LeftPanelDisplayedTab::WarpDrive => ToolPanelView::WarpDrive,
                 LeftPanelDisplayedTab::ConversationListView => ToolPanelView::ConversationListView,
                 LeftPanelDisplayedTab::SshManager => ToolPanelView::SshManager,
+                LeftPanelDisplayedTab::RemoteFiles => ToolPanelView::RemoteFiles,
                 LeftPanelDisplayedTab::SkillManager => ToolPanelView::SkillManager,
             };
             lp.restore_active_view_from_snapshot(active_view, ctx);
@@ -15296,6 +15298,9 @@ impl Workspace {
                         ToolPanelView::SshManager => {
                             crate::t!("workspace-left-panel-ssh-manager")
                         }
+                        ToolPanelView::RemoteFiles => {
+                            crate::t!("workspace-left-panel-remote-files")
+                        }
                         ToolPanelView::SkillManager => {
                             crate::t!("workspace-left-panel-skill-manager")
                         }
@@ -15361,6 +15366,9 @@ impl Workspace {
                 }
                 ToolPanelView::SshManager => {
                     crate::t!("workspace-left-panel-ssh-manager")
+                }
+                ToolPanelView::RemoteFiles => {
+                    crate::t!("workspace-left-panel-remote-files")
                 }
                 ToolPanelView::SkillManager => {
                     crate::t!("workspace-left-panel-skill-manager")
@@ -18035,6 +18043,9 @@ impl Workspace {
         }
         // openWarp 独有:SSH 管理器,无 feature flag,默认始终显示。
         views.push(ToolPanelView::SshManager);
+        if cfg!(feature = "local_fs") {
+            views.push(ToolPanelView::RemoteFiles);
+        }
         // openWarp 独有:Skill 管理器,无 feature flag,local_fs 构建下默认显示。
         if cfg!(feature = "local_fs") {
             views.push(ToolPanelView::SkillManager);
@@ -19642,6 +19653,11 @@ impl TypedActionView for Workspace {
                 let is_showing =
                     self.left_panel_view.as_ref(ctx).active_view() == ToolPanelView::SshManager;
                 self.toggle_left_panel_view(&LeftPanelAction::SshManager, is_showing, ctx);
+            }
+            ToggleRemoteFiles => {
+                let is_showing =
+                    self.left_panel_view.as_ref(ctx).active_view() == ToolPanelView::RemoteFiles;
+                self.toggle_left_panel_view(&LeftPanelAction::RemoteFiles, is_showing, ctx);
             }
             ToggleSkillManager => {
                 let is_showing =

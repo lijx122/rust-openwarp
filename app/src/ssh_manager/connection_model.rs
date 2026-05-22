@@ -131,12 +131,6 @@ impl SshConnectionModel {
         match event {
             RemoteServerManagerEvent::SessionConnected { host_id, .. }
             | RemoteServerManagerEvent::SessionReconnected { host_id, .. } => {
-                tracing::info!(
-                    target: "ssh_manager_connection_model",
-                    session_id = ?session_id,
-                    host_id = ?host_id,
-                    "SessionConnected fired for session_id={session_id:?}, host_id={host_id:?}"
-                );
                 connection.host_id = Some(host_id.clone());
                 connection.state = SshConnectionState::Connected;
             }

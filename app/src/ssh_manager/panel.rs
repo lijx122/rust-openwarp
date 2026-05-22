@@ -851,16 +851,6 @@ impl SshManagerPanel {
         let current_host_id = connection.and_then(|connection| connection.host_id.as_ref());
         let current_state = connection.map(|connection| &connection.state);
         let remote_roots = self.collect_remote_root_directories(app);
-        let first_root_path = remote_roots.first().map(|root| &root.path);
-        tracing::info!(
-            target: "ssh_manager_panel",
-            selected_id = ?selected_id,
-            host_id = ?current_host_id,
-            connection_state = ?current_state,
-            remote_roots_len = remote_roots.len(),
-            first_root_path = ?first_root_path,
-            "ssh manager panel render state"
-        );
         let show_file_tree =
             self.is_file_tree_active && current_host_id.is_some() && !remote_roots.is_empty();
         let mut col = Flex::column();

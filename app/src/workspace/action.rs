@@ -148,6 +148,8 @@ pub enum WorkspaceAction {
     },
     /// 打开/关闭左侧 panel 的 SSH 管理器视图(openWarp 独有)。
     ToggleSshManager,
+    /// 打开/关闭左侧 panel 的远程文件视图(openWarp 独有)。
+    ToggleRemoteFiles,
     /// 打开/关闭左侧 panel 的 Skill 管理器视图(openWarp 独有)。
     ToggleSkillManager,
     AddTabWithShell {
@@ -668,6 +670,7 @@ impl WorkspaceAction {
             | AddTerminalTab { .. }
             | OpenSshTerminal { .. }
             | ToggleSshManager
+            | ToggleRemoteFiles
             | ToggleSkillManager
             | AddTabWithShell { .. }
             | AddGetStartedTab
