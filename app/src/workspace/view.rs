@@ -5333,6 +5333,9 @@ impl Workspace {
                 view.set_enter_agent_view_after_ssh_bootstrap();
             });
         }
+        terminal_view.update(ctx, |view, _| {
+            view.set_auto_warpify_ssh_after_login();
+        });
 
         // 1. 同步读 keychain(主线程 OK)。auth_type 决定查 password 还是 passphrase。
         let secret_kind = match server.auth_type {

@@ -2339,6 +2339,7 @@ pub struct TerminalView {
     /// `pane_tree_from_template_recursive` when a tab config has both
     /// commands and `PaneMode::Agent`.
     enter_agent_view_after_pending_commands: bool,
+    auto_warpify_ssh_after_login: bool,
     /// SSH 管理器创建的 tab 会先启动本地 shell，再执行 ssh 并等待远端 shell
     /// bootstrap；默认 Agent 模式必须延后到远端会话可用后再进入。
     enter_agent_view_after_ssh_bootstrap: bool,
@@ -3770,6 +3771,7 @@ impl TerminalView {
             awaiting_pending_command_completion: false,
             enter_agent_view_after_pending_commands: false,
             enter_agent_view_after_ssh_bootstrap: false,
+            auto_warpify_ssh_after_login: false,
             slow_bootstrap_banner,
             is_slow_bootstrap_banner_open: false,
             incompatible_configuration_banner,
@@ -9781,6 +9783,11 @@ impl TerminalView {
                 cloud_workflow_id,
                 cloud_env_var_collection_id,
             }) => {
+                if self.auto_warpify_ssh_after_login
+                    && self.warpify_state.get_pending_ssh_host().is_some()
+                {
+                    self.auto_warpify_ssh_after_login = false;
+                }
                 // To automatically warpify a subshell, we run the relevant command to open the
                 // subshell and create a future to delay bootstrapping the subshell long enough for
                 // the command to complete. We receive AfterBlockCompleted if the subshell command
@@ -13238,6 +13245,10 @@ impl TerminalView {
 
     pub fn set_enter_agent_view_after_ssh_bootstrap(&mut self) {
         self.enter_agent_view_after_ssh_bootstrap = true;
+    }
+
+    pub fn set_auto_warpify_ssh_after_login(&mut self) {
+        self.auto_warpify_ssh_after_login = true;
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -22364,6 +22375,8 @@ impl TerminalView {
                     return;
                 };
                 let ssh_host = &self.warpify_state.get_pending_ssh_host();
+                let auto_warpify_ssh_after_login = self.auto_warpify_ssh_after_login;
+                self.auto_warpify_ssh_after_login = false;
 
                 let shell_family = self.shell_family(ctx);
                 let warpify_settings = WarpifySettings::as_ref(ctx);
@@ -22380,7 +22393,9 @@ impl TerminalView {
                     ref command,
                 } = ssh_interactive_session_event
                 {
-                    if FeatureFlag::WarpifyFooter.is_enabled() {
+                    if auto_warpify_ssh_after_login {
+                        self.add_ssh_warpifying_block(ctx);
+                    } else if FeatureFlag::WarpifyFooter.is_enabled() {
                         self.show_warpify_footer(
                             WarpificationMode::ssh(command.clone(), host.to_owned()),
                             ctx,
