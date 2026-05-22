@@ -62,6 +62,31 @@ impl SftpBrowserModel {
         );
     }
 
+    pub fn run_ssh_command_for_host(
+        &self,
+        host_id: HostId,
+        remote_command: String,
+        ctx: &mut ModelContext<Self>,
+        on_complete: impl FnOnce(&mut Self, Result<Output>, &mut ModelContext<Self>) + 'static,
+    ) {
+        let Some(host) = self.hosts.get(&host_id).cloned() else {
+            return;
+        };
+        let keepalive = SshSettings::as_ref(ctx).keepalive_options();
+        ctx.spawn(
+            async move {
+                run_ssh_command(
+                    &host.server,
+                    &remote_command,
+                    SFTP_OPERATION_TIMEOUT,
+                    keepalive,
+                )
+                .await
+            },
+            on_complete,
+        );
+    }
+
     pub fn load_directory(
         &self,
         host_id: HostId,
@@ -253,6 +278,48 @@ async fn run_sftp_batch(
     .await
 }
 
+async fn run_ssh_command(
+    server: &SshServerInfo,
+    remote_command: &str,
+    timeout: Duration,
+    keepalive: remote_server::ssh::SshKeepaliveOptions,
+) -> Result<Output> {
+    let secret = read_secret(server);
+    let askpass = secret
+        .as_deref()
+        .filter(|secret| !secret.is_empty())
+        .map(create_askpass_script)
+        .transpose()?;
+
+    let mut command = Command::new("ssh");
+    command
+        .args(ssh_args(server, &keepalive))
+        .arg(remote_command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    if let Some(script) = askpass.as_ref() {
+        command
+            .env("SSH_ASKPASS", script.path.as_os_str())
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env("DISPLAY", "openwarp");
+    }
+
+    future::race(
+        async {
+            command
+                .output()
+                .await
+                .context("failed to collect ssh output")
+        },
+        async move {
+            futures_timer::Delay::new(timeout).await;
+            Err(anyhow!("ssh command timed out after {timeout:?}"))
+        },
+    )
+    .await
+}
+
 fn sftp_args(
     server: &SshServerInfo,
     keepalive: &remote_server::ssh::SshKeepaliveOptions,
@@ -284,6 +351,55 @@ fn sftp_args(
 
     if server.port != 22 {
         args.push("-P".to_string());
+        args.push(server.port.to_string());
+    }
+    if server.auth_type == AuthType::Key {
+        if let Some(path) = server.key_path.as_deref() {
+            if !path.is_empty() {
+                args.push("-i".to_string());
+                args.push(path.to_string());
+            }
+        }
+    }
+    args.push(if server.username.is_empty() {
+        server.host.clone()
+    } else {
+        format!("{}@{}", server.username, server.host)
+    });
+    args
+}
+
+fn ssh_args(
+    server: &SshServerInfo,
+    keepalive: &remote_server::ssh::SshKeepaliveOptions,
+) -> Vec<String> {
+    let mut args = vec![
+        "-o".to_string(),
+        "BatchMode=no".to_string(),
+        "-o".to_string(),
+        "StrictHostKeyChecking=accept-new".to_string(),
+        "-o".to_string(),
+        format!("ConnectTimeout={SFTP_CONNECT_TIMEOUT_SECS}"),
+    ];
+
+    if let Some(interval) = keepalive.server_alive_interval_secs {
+        args.push("-o".to_string());
+        args.push(format!("ServerAliveInterval={interval}"));
+    }
+    if let Some(max) = keepalive.server_alive_count_max {
+        args.push("-o".to_string());
+        args.push(format!("ServerAliveCountMax={max}"));
+    }
+    if let Some(enabled) = keepalive.tcp_keepalive_enabled {
+        args.push("-o".to_string());
+        args.push(format!(
+            "TCPKeepAlive={}",
+            if enabled { "yes" } else { "no" }
+        ));
+    }
+
+    if server.port != 22 {
+        args.push("-p".to_string());
         args.push(server.port.to_string());
     }
     if server.auth_type == AuthType::Key {
