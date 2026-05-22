@@ -18,6 +18,7 @@ use crate::network::NetworkStatus;
 use crate::notebooks::editor::keys::NotebookKeybindings;
 use crate::notebooks::notebook::NotebookView;
 use crate::pane_group::{Direction, PaneGroupAction, PaneId};
+use crate::util::file::external_editor::EditorSettings;
 use crate::pricing::PricingInfoModel;
 use crate::suggestions::ignored_suggestions_model::IgnoredSuggestionsModel;
 use crate::terminal::shared_session::protocol::SessionSourceType;
@@ -487,6 +488,426 @@ fn reopen_closed_session_menu_item(
         Some(MenuItem::Item(fields)) if fields.label() == "Reopen closed session" => fields,
         _ => panic!("expected Reopen closed session to be the last new-session menu item"),
     }
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_resolve_open_code_target_reuses_active_code_pane() {
+    let active = PaneId::dummy_pane_id();
+    let other = PaneId::dummy_pane_id();
+
+    assert_eq!(
+        pane_group::resolve_open_code_target(
+            pane_group::ActivePaneKind::Code(active),
+            &[other],
+            pane_group::EditorLayout::NewTab,
+            true,
+        ),
+        pane_group::OpenCodeDecision::ReuseActive(active)
+    );
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_resolve_open_code_target_reuses_first_visible_code_pane() {
+    let first = PaneId::dummy_pane_id();
+    let second = PaneId::dummy_pane_id();
+
+    assert_eq!(
+        pane_group::resolve_open_code_target(
+            pane_group::ActivePaneKind::NonCode,
+            &[first, second],
+            pane_group::EditorLayout::NewTab,
+            true,
+        ),
+        pane_group::OpenCodeDecision::ReuseFirstVisible(first)
+    );
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_resolve_open_code_target_creates_new_tab_without_visible_code_pane() {
+    assert_eq!(
+        pane_group::resolve_open_code_target(
+            pane_group::ActivePaneKind::NonCode,
+            &[],
+            pane_group::EditorLayout::NewTab,
+            true,
+        ),
+        pane_group::OpenCodeDecision::CreateInNewTab
+    );
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_resolve_open_code_target_forces_split_without_visible_code_pane() {
+    assert_eq!(
+        pane_group::resolve_open_code_target(
+            pane_group::ActivePaneKind::NonCode,
+            &[],
+            pane_group::EditorLayout::SplitPane,
+            true,
+        ),
+        pane_group::OpenCodeDecision::CreateInNewSplit
+    );
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_resolve_open_code_target_split_layout_always_creates_split() {
+    let active = PaneId::dummy_pane_id();
+    let visible = PaneId::dummy_pane_id();
+
+    assert_eq!(
+        pane_group::resolve_open_code_target(
+            pane_group::ActivePaneKind::Code(active),
+            &[visible],
+            pane_group::EditorLayout::SplitPane,
+            true,
+        ),
+        pane_group::OpenCodeDecision::CreateInNewSplit
+    );
+
+    assert_eq!(
+        pane_group::resolve_open_code_target(
+            pane_group::ActivePaneKind::NonCode,
+            &[visible],
+            pane_group::EditorLayout::SplitPane,
+            true,
+        ),
+        pane_group::OpenCodeDecision::CreateInNewSplit
+    );
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_resolve_open_code_target_disabled_routing_uses_create_paths() {
+    let active = PaneId::dummy_pane_id();
+    let visible = PaneId::dummy_pane_id();
+
+    assert_eq!(
+        pane_group::resolve_open_code_target(
+            pane_group::ActivePaneKind::Code(active),
+            &[visible],
+            pane_group::EditorLayout::NewTab,
+            false,
+        ),
+        pane_group::OpenCodeDecision::CreateInNewTab
+    );
+
+    assert_eq!(
+        pane_group::resolve_open_code_target(
+            pane_group::ActivePaneKind::Code(active),
+            &[visible],
+            pane_group::EditorLayout::SplitPane,
+            false,
+        ),
+        pane_group::OpenCodeDecision::CreateInNewSplit
+    );
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_open_file_with_target_reuses_active_code_pane_when_tabbed_editor_enabled() {
+    let _tabbed_editor_guard = FeatureFlag::TabbedEditorView.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            EditorSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings
+                    .prefer_tabbed_editor_view
+                    .set_value(true, ctx));
+                report_if_error!(settings
+                    .open_file_layout
+                    .set_value(pane_group::EditorLayout::NewTab, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::NewCodeFile, ctx);
+            let pane_group = workspace.active_tab_pane_group();
+            let existing_pane = pane_group.as_ref(ctx).focused_pane_id(ctx);
+            let existing_pane_ids: Vec<_> = pane_group.as_ref(ctx).pane_ids().collect();
+            let tab_count_before = workspace.tab_count();
+
+            workspace.open_file_with_target(
+                PathBuf::from("C:/tmp/reuse-active.rs"),
+                FileTarget::CodeEditor(pane_group::EditorLayout::NewTab),
+                None,
+                CodeSource::Link {
+                    path: PathBuf::from("C:/tmp/reuse-active.rs"),
+                    range_start: None,
+                    range_end: None,
+                },
+                ctx,
+            );
+
+            let pane_group = workspace.active_tab_pane_group();
+            assert_eq!(workspace.tab_count(), tab_count_before);
+            assert_eq!(pane_group.as_ref(ctx).pane_count(), existing_pane_ids.len());
+            assert_eq!(pane_group.as_ref(ctx).focused_pane_id(ctx), existing_pane);
+        });
+    });
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_open_file_with_target_reuses_visible_code_pane_when_active_pane_is_not_code() {
+    let _tabbed_editor_guard = FeatureFlag::TabbedEditorView.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            EditorSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings
+                    .prefer_tabbed_editor_view
+                    .set_value(true, ctx));
+                report_if_error!(settings
+                    .open_file_layout
+                    .set_value(pane_group::EditorLayout::NewTab, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::NewCodeFile, ctx);
+            workspace.active_tab_pane_group().update(ctx, |pane_group, ctx| {
+                pane_group.add_terminal_pane(Direction::Right, None, ctx);
+            });
+
+            let pane_group = workspace.active_tab_pane_group();
+            let existing_pane_ids: Vec<_> = pane_group.as_ref(ctx).pane_ids().collect();
+            let code_pane_id = pane_group
+                .as_ref(ctx)
+                .pane_ids()
+                .find(|pane_id| pane_id.is_code_pane())
+                .expect("expected code pane");
+            let focused_before = pane_group.as_ref(ctx).focused_pane_id(ctx);
+            assert!(!focused_before.is_code_pane());
+            let tab_count_before = workspace.tab_count();
+
+            workspace.open_file_with_target(
+                PathBuf::from("C:/tmp/reuse-visible.rs"),
+                FileTarget::CodeEditor(pane_group::EditorLayout::NewTab),
+                None,
+                CodeSource::Link {
+                    path: PathBuf::from("C:/tmp/reuse-visible.rs"),
+                    range_start: None,
+                    range_end: None,
+                },
+                ctx,
+            );
+
+            let pane_group = workspace.active_tab_pane_group();
+            assert_eq!(workspace.tab_count(), tab_count_before);
+            assert_eq!(pane_group.as_ref(ctx).pane_count(), existing_pane_ids.len());
+            assert_eq!(pane_group.as_ref(ctx).focused_pane_id(ctx), code_pane_id);
+        });
+    });
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_open_file_with_target_creates_new_tab_when_no_visible_code_pane_exists() {
+    let _tabbed_editor_guard = FeatureFlag::TabbedEditorView.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            EditorSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings
+                    .prefer_tabbed_editor_view
+                    .set_value(true, ctx));
+                report_if_error!(settings
+                    .open_file_layout
+                    .set_value(pane_group::EditorLayout::NewTab, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let tab_count_before = workspace.tab_count();
+            let pane_ids_before: Vec<_> = workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .pane_ids()
+                .collect();
+
+            workspace.open_file_with_target(
+                PathBuf::from("C:/tmp/create-tab.rs"),
+                FileTarget::CodeEditor(pane_group::EditorLayout::NewTab),
+                None,
+                CodeSource::Link {
+                    path: PathBuf::from("C:/tmp/create-tab.rs"),
+                    range_start: None,
+                    range_end: None,
+                },
+                ctx,
+            );
+
+            assert_eq!(workspace.tab_count(), tab_count_before + 1);
+            let new_tab = workspace.active_tab_pane_group();
+            assert_eq!(new_tab.as_ref(ctx).pane_count(), 1);
+            let new_pane = get_newly_created_pane_id(new_tab.as_ref(ctx), &pane_ids_before);
+            assert!(new_pane.is_code_pane());
+        });
+    });
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_open_file_with_target_preview_path_reuses_active_code_pane_when_tabbed_editor_enabled() {
+    let _tabbed_editor_guard = FeatureFlag::TabbedEditorView.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            EditorSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings
+                    .prefer_tabbed_editor_view
+                    .set_value(true, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::NewCodeFile, ctx);
+            let pane_group = workspace.active_tab_pane_group();
+            let pane_ids_before: Vec<_> = pane_group.as_ref(ctx).pane_ids().collect();
+            let code_pane_before = pane_group
+                .as_ref(ctx)
+                .pane_ids()
+                .find(|pane_id| pane_id.is_code_pane())
+                .expect("expected code pane");
+
+            workspace.handle_file_tree_event(
+                pane_group.clone(),
+                &pane_group::Event::PreviewCodeInWarp {
+                    source: CodeSource::Link {
+                        path: PathBuf::from("C:/tmp/preview-tab.rs"),
+                        range_start: None,
+                        range_end: None,
+                    },
+                },
+                ctx,
+            );
+
+            let pane_group = workspace.active_tab_pane_group();
+            assert_eq!(pane_group.as_ref(ctx).pane_count(), pane_ids_before.len());
+            assert_eq!(pane_group.as_ref(ctx).focused_pane_id(ctx), code_pane_before);
+        });
+    });
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_open_file_with_target_preview_path_still_creates_split_when_tabbed_editor_disabled() {
+    let _tabbed_editor_guard = FeatureFlag::TabbedEditorView.override_enabled(false);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            EditorSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings
+                    .prefer_tabbed_editor_view
+                    .set_value(false, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(&WorkspaceAction::NewCodeFile, ctx);
+            let pane_group = workspace.active_tab_pane_group();
+            let pane_ids_before: Vec<_> = pane_group.as_ref(ctx).pane_ids().collect();
+            let code_pane_before = pane_group
+                .as_ref(ctx)
+                .pane_ids()
+                .find(|pane_id| pane_id.is_code_pane())
+                .expect("expected code pane");
+
+            workspace.handle_file_tree_event(
+                pane_group.clone(),
+                &pane_group::Event::PreviewCodeInWarp {
+                    source: CodeSource::Link {
+                        path: PathBuf::from("C:/tmp/preview-split.rs"),
+                        range_start: None,
+                        range_end: None,
+                    },
+                },
+                ctx,
+            );
+
+            let pane_group = workspace.active_tab_pane_group();
+            assert_eq!(pane_group.as_ref(ctx).pane_count(), pane_ids_before.len() + 1);
+            let new_pane = get_newly_created_pane_id(pane_group.as_ref(ctx), &pane_ids_before);
+            assert!(new_pane.is_code_pane());
+            assert_eq!(pane_group.as_ref(ctx).focused_pane_id(ctx), code_pane_before);
+        });
+    });
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_open_file_with_target_grouping_off_reuses_existing_locator() {
+    let _tabbed_editor_guard = FeatureFlag::TabbedEditorView.override_enabled(false);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            EditorSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings
+                    .prefer_tabbed_editor_view
+                    .set_value(false, ctx));
+                report_if_error!(settings
+                    .open_file_layout
+                    .set_value(pane_group::EditorLayout::SplitPane, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+        let path = PathBuf::from("C:/tmp/grouping-off.rs");
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.open_file_with_target(
+                path.clone(),
+                FileTarget::CodeEditor(pane_group::EditorLayout::SplitPane),
+                None,
+                CodeSource::Link {
+                    path: path.clone(),
+                    range_start: None,
+                    range_end: None,
+                },
+                ctx,
+            );
+
+            let pane_group = workspace.active_tab_pane_group();
+            let pane_ids_before: Vec<_> = pane_group.as_ref(ctx).pane_ids().collect();
+            let existing_code_pane = pane_group.as_ref(ctx).focused_pane_id(ctx);
+
+            workspace.open_file_with_target(
+                path.clone(),
+                FileTarget::CodeEditor(pane_group::EditorLayout::SplitPane),
+                None,
+                CodeSource::Link {
+                    path: path.clone(),
+                    range_start: None,
+                    range_end: None,
+                },
+                ctx,
+            );
+
+            let pane_group = workspace.active_tab_pane_group();
+            assert_eq!(pane_group.as_ref(ctx).pane_count(), pane_ids_before.len());
+            assert_eq!(pane_group.as_ref(ctx).focused_pane_id(ctx), existing_code_pane);
+        });
+    });
 }
 
 #[test]

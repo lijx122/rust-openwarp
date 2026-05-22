@@ -166,6 +166,7 @@ pub use pane::terminal_pane::TerminalPane;
 pub use pane::workflow_pane::WorkflowPane;
 pub use pane::PaneHeaderAction;
 pub use pane::PaneHeaderCustomAction;
+pub use crate::util::file::external_editor::settings::EditorLayout;
 pub use pane::{
     AnyPaneContent, BackingView, PaneConfiguration, PaneConfigurationEvent, PaneContent, PaneEvent,
     PaneId, PaneView, TerminalPaneId,
@@ -958,6 +959,47 @@ enum AIDocumentPaneVisibilityAction {
     ///
     /// If the requested pane is open, this will close it. Otherwise it will open it.
     Toggle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivePaneKind {
+    Code(PaneId),
+    NonCode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenCodeDecision {
+    ReuseActive(PaneId),
+    ReuseFirstVisible(PaneId),
+    CreateInNewSplit,
+    CreateInNewTab,
+}
+
+pub fn resolve_open_code_target(
+    active_pane_kind: ActivePaneKind,
+    visible_code_panes: &[PaneId],
+    layout: EditorLayout,
+    tabbed_editor_routing_enabled: bool,
+) -> OpenCodeDecision {
+    if matches!(layout, EditorLayout::SplitPane) {
+        return OpenCodeDecision::CreateInNewSplit;
+    }
+
+    if !tabbed_editor_routing_enabled {
+        return match layout {
+            EditorLayout::NewTab => OpenCodeDecision::CreateInNewTab,
+            EditorLayout::SplitPane => OpenCodeDecision::CreateInNewSplit,
+        };
+    }
+
+    match active_pane_kind {
+        ActivePaneKind::Code(pane_id) => OpenCodeDecision::ReuseActive(pane_id),
+        ActivePaneKind::NonCode => visible_code_panes
+            .first()
+            .copied()
+            .map(OpenCodeDecision::ReuseFirstVisible)
+            .unwrap_or(OpenCodeDecision::CreateInNewTab),
+    }
 }
 
 impl PaneGroup {

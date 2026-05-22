@@ -217,8 +217,8 @@ use crate::notebooks::manager::{NotebookManager, NotebookSource};
 #[cfg(feature = "local_fs")]
 use crate::pane_group::FilePane;
 use crate::pane_group::{
-    self, AnyPaneContent, CodeDiffPane, CodePane, Direction, NewTerminalOptions, PanesLayout,
-    TabBarHoverIndex,
+    self, ActivePaneKind, AnyPaneContent, CodeDiffPane, CodePane, Direction, NewTerminalOptions,
+    OpenCodeDecision, PanesLayout, TabBarHoverIndex,
 };
 use crate::remote_server::manager::RemoteServerManager;
 #[cfg(feature = "local_fs")]
@@ -6659,46 +6659,16 @@ impl Workspace {
             ctx
         );
 
-        let grouping_on = FeatureFlag::TabbedEditorView.is_enabled()
+        let tabbed_editor_routing_enabled = FeatureFlag::TabbedEditorView.is_enabled()
             && *EditorSettings::as_ref(ctx)
                 .prefer_tabbed_editor_view
                 .value();
 
-        if grouping_on {
-            let code_view = self
-                .active_tab_pane_group()
-                .as_ref(ctx)
-                .code_panes(ctx)
-                .find(|(pane_id, _)| {
-                    !self
-                        .active_tab_pane_group()
-                        .as_ref(ctx)
-                        .is_pane_hidden_for_close(*pane_id)
-                });
-            // If the tabbed editor view is enabled and there is an existing CodeView, we should group the newly opened file into this view.
-            if let (Some(path), Some((pane_id, code_view))) = (source.path(), code_view) {
-                code_view.update(ctx, |code_view, ctx| {
-                    if preview {
-                        code_view.open_in_preview_or_promote_and_jump(path, line_col, ctx);
-                    } else {
-                        code_view.open_or_focus_existing(Some(path), line_col, ctx);
-                    }
-                    for extra in additional_paths {
-                        code_view.open_or_focus_existing(Some(extra.clone()), None, ctx);
-                    }
-                });
-                // Only focus the pane for non-preview opens
-                if !preview {
-                    self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
-                        pane_group.focus_pane(pane_id, true, ctx);
-                    });
-                }
-                return;
-            }
-        } else {
+        let source_path = source.path();
+        if !tabbed_editor_routing_enabled {
             // When grouping is off, avoid opening duplicate code panes for the same file in the
             // current pane group. Instead, focus the existing pane and jump.
-            if let Some(path) = source.path() {
+            if let Some(path) = source_path.as_ref() {
                 let pane_group_id = self.active_tab_pane_group().id();
                 let existing_locator = CodeManager::handle(ctx).read(ctx, |manager, _| {
                     manager.get_locator_for_path_in_tab(pane_group_id, path.as_path())
@@ -6742,23 +6712,74 @@ impl Workspace {
             }
         }
 
+        let active_pane_group = self.active_tab_pane_group();
+        let focused_pane_id = active_pane_group.as_ref(ctx).focused_pane_id(ctx);
+        let active_pane_kind = if focused_pane_id.is_code_pane() {
+            ActivePaneKind::Code(focused_pane_id)
+        } else {
+            ActivePaneKind::NonCode
+        };
+        let visible_code_pane_ids = active_pane_group.as_ref(ctx).code_panes(ctx).filter_map(
+            |(pane_id, _)| {
+                (!active_pane_group
+                    .as_ref(ctx)
+                    .is_pane_hidden_for_close(pane_id))
+                .then_some(pane_id)
+            },
+        );
+        let visible_code_pane_ids = visible_code_pane_ids.collect::<Vec<_>>();
+        let open_decision = pane_group::resolve_open_code_target(
+            active_pane_kind,
+            &visible_code_pane_ids,
+            layout,
+            tabbed_editor_routing_enabled,
+        );
+
+        match open_decision {
+            OpenCodeDecision::ReuseActive(pane_id)
+            | OpenCodeDecision::ReuseFirstVisible(pane_id) => {
+                if let Some(code_view) = self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
+                    pane_group.code_view_from_pane_id(pane_id, ctx)
+                }) {
+                    if let Some(path) = source_path.clone() {
+                        code_view.update(ctx, |code_view, ctx| {
+                            if preview {
+                                code_view.open_in_preview_or_promote_and_jump(path, line_col, ctx);
+                            } else {
+                                code_view.open_or_focus_existing(Some(path), line_col, ctx);
+                            }
+                            for extra in additional_paths {
+                                code_view.open_or_focus_existing(Some(extra.clone()), None, ctx);
+                            }
+                        });
+                        if !preview {
+                            self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
+                                pane_group.focus_pane(pane_id, true, ctx);
+                            });
+                        }
+                        return;
+                    }
+                }
+            }
+            OpenCodeDecision::CreateInNewTab | OpenCodeDecision::CreateInNewSplit => {}
+        }
+
         let pane = if preview {
             CodePane::new_preview(source, ctx)
         } else {
             CodePane::new(source, line_col, ctx)
         };
 
-        match layout {
-            EditorLayout::NewTab => {
+        match open_decision {
+            OpenCodeDecision::CreateInNewTab => {
                 let new_tab_placement_setting = TabSettings::as_ref(ctx).new_tab_placement;
                 let new_idx = match new_tab_placement_setting {
                     NewTabPlacement::AfterAllTabs => self.tab_count(),
-                    // Add tab after current tab
                     NewTabPlacement::AfterCurrentTab => self.active_tab_index + 1,
                 };
                 self.add_tab_from_existing_pane(Box::new(pane), new_idx, ctx);
             }
-            EditorLayout::SplitPane => {
+            OpenCodeDecision::CreateInNewSplit => {
                 self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
                     pane_group.add_pane_with_direction(
                         Direction::Right,
@@ -6768,9 +6789,9 @@ impl Workspace {
                     );
                 });
             }
+            OpenCodeDecision::ReuseActive(_) | OpenCodeDecision::ReuseFirstVisible(_) => unreachable!(),
         }
 
-        // Open any additional paths as tabs in the code view we just created.
         if !additional_paths.is_empty() {
             let code_view_handle = self
                 .active_tab_pane_group()
@@ -12085,14 +12106,17 @@ impl Workspace {
             }
             #[cfg(feature = "local_fs")]
             pane_group::Event::PreviewCodeInWarp { source } => {
-                self.open_code(
-                    source.clone(),
-                    EditorLayout::SplitPane, // preview always uses split pane
-                    None,                    // no line/column for preview
-                    true,                    // preview
-                    &[],
-                    ctx,
-                );
+                let preview_layout = if FeatureFlag::TabbedEditorView.is_enabled()
+                    && *EditorSettings::as_ref(ctx)
+                        .prefer_tabbed_editor_view
+                        .value()
+                {
+                    EditorLayout::NewTab
+                } else {
+                    EditorLayout::SplitPane
+                };
+
+                self.open_code(source.clone(), preview_layout, None, true, &[], ctx);
             }
             pane_group::Event::OpenCodeDiff { view } => {
                 self.open_code_diff(view.clone(), ctx);
@@ -12402,11 +12426,20 @@ impl Workspace {
                         TabBarHoverIndex::OverTab(workspace_tab_index) => {
                             #[cfg(not(target_family = "wasm"))]
                             {
-                                let prefers_tabbed_editor_view = FeatureFlag::TabbedEditorView
+                                let prefers_tabbed_editor_view = if FeatureFlag::TabbedEditorView
                                     .is_enabled()
-                                    && *EditorSettings::as_ref(ctx)
+                                {
+                                    *EditorSettings::as_ref(ctx)
                                         .prefer_tabbed_editor_view
-                                        .value();
+                                        .value()
+                                } else {
+                                    false
+                                };
+
+                                // TODO(tabbed-editor-routing): 此处的 prefers_tabbed_editor_view
+                                // 判断与“打开文件路由”语义不同（拖拽合并），本期未收敛。
+                                // follow-up 时需单独设计决策函数，不能复用
+                                // resolve_open_code_target。
 
                                 let target_pane_group =
                                     self.get_pane_group_view(workspace_tab_index);
@@ -12545,10 +12578,18 @@ impl Workspace {
                 hidden_pane_preview_direction,
             } => {
                 #[cfg(feature = "local_fs")]
-                let prefers_tabbed_editor_view = FeatureFlag::TabbedEditorView.is_enabled()
-                    && *EditorSettings::as_ref(ctx)
+                let prefers_tabbed_editor_view = if FeatureFlag::TabbedEditorView.is_enabled() {
+                    *EditorSettings::as_ref(ctx)
                         .prefer_tabbed_editor_view
-                        .value();
+                        .value()
+                } else {
+                    false
+                };
+
+                // TODO(tabbed-editor-routing): 此处的 prefers_tabbed_editor_view
+                // 判断与“打开文件路由”语义不同（pane 移动决策），本期未收敛。
+                // follow-up 时需单独设计决策函数，不能复用
+                // resolve_open_code_target。
 
                 #[cfg(not(feature = "local_fs"))]
                 let prefers_tabbed_editor_view = false;
