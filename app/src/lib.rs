@@ -1519,6 +1519,7 @@ fn initialize_app(
     ctx.add_singleton_model(|_| KeybindingChangedNotifier::new());
     ctx.add_singleton_model(|_| crate::ssh_manager::SshTreeChangedNotifier::new());
     ctx.add_singleton_model(|ctx| crate::ssh_manager::SshConnectionModel::new(ctx));
+    ctx.add_singleton_model(|ctx| crate::ssh_manager::SftpBrowserModel::new(ctx));
     ctx.add_singleton_model(|_| search::command_palette::SelectedItems::new());
     ctx.add_singleton_model(search::files::model::FileSearchModel::new);
     ctx.add_singleton_model(|_| VimRegisters::new());

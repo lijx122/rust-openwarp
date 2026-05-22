@@ -8,6 +8,7 @@ pub mod notifier;
 pub mod panel;
 pub mod secret_injector;
 pub mod server_view;
+pub mod sftp_browser_model;
 
 pub use connection_model::{SshConnectionModel, SshConnectionState};
 pub use notifier::{SshTreeChangedEvent, SshTreeChangedNotifier};
@@ -15,3 +16,4 @@ pub use panel::SshManagerPanel;
 // Re-exports for downstream UI consumers (Commit 2b).
 #[allow(unused_imports)]
 pub use panel::{SshManagerPanelAction, SshManagerPanelEvent};
+pub use sftp_browser_model::SftpBrowserModel;

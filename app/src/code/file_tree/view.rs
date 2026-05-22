@@ -225,7 +225,6 @@ struct PendingEdit {
     id: FileTreeIdentifier,
 }
 
-#[derive(Clone)]
 struct RemoteActionTarget {
     host_id: HostId,
     control_path: PathBuf,
@@ -1444,10 +1443,6 @@ impl FileTreeView {
     ) {
         use crate::remote_server::manager::RemoteServerManager;
 
-        if !FeatureFlag::SshRemoteServer.is_enabled() {
-            return;
-        }
-
         let Some(root_dir) = self.root_directories.get(root_path) else {
             return;
         };
@@ -1457,6 +1452,22 @@ impl FileTreeView {
             log::warn!("load_remote_directory: no host_id for {root_path}");
             return;
         };
+
+        if crate::ssh_manager::SftpBrowserModel::as_ref(ctx).is_managed_host(host_id) {
+            crate::ssh_manager::SftpBrowserModel::handle(ctx).update(ctx, |model, ctx| {
+                model.load_directory(
+                    host_id.clone(),
+                    root_dir.entry.root_directory().as_ref().clone(),
+                    target_item.path().clone(),
+                    ctx,
+                );
+            });
+            return;
+        }
+
+        if !FeatureFlag::SshRemoteServer.is_enabled() {
+            return;
+        }
 
         // Find a connected session for the host that owns this remote root.
         let mgr = RemoteServerManager::as_ref(ctx);
@@ -2225,6 +2236,23 @@ impl FileTreeView {
         ctx: &mut ViewContext<Self>,
     ) {
         use crate::remote_server::manager::RemoteServerManager;
+
+        if crate::ssh_manager::SftpBrowserModel::as_ref(ctx).is_managed_host(&host_id) {
+            let Ok(repo_root) =
+                StandardizedPath::try_with_encoding(&repo_root, typed_path::PathType::Unix)
+            else {
+                return;
+            };
+            let Ok(dir_path) =
+                StandardizedPath::try_with_encoding(&dir_path, typed_path::PathType::Unix)
+            else {
+                return;
+            };
+            crate::ssh_manager::SftpBrowserModel::handle(ctx).update(ctx, |model, ctx| {
+                model.load_directory(host_id.clone(), repo_root, dir_path, ctx);
+            });
+            return;
+        }
 
         let session_id = RemoteServerManager::as_ref(ctx)
             .sessions_for_host(&host_id)
