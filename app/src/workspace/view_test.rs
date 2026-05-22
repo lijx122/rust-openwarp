@@ -489,6 +489,122 @@ fn reopen_closed_session_menu_item(
     }
 }
 
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_resolve_open_code_target_reuses_active_code_pane() {
+    let active = PaneId::dummy_pane_id();
+    let other = PaneId::dummy_pane_id();
+
+    assert_eq!(
+        pane_group::resolve_open_code_target(
+            pane_group::ActivePaneKind::Code(active),
+            &[other],
+            pane_group::EditorLayout::NewTab,
+            true,
+        ),
+        pane_group::OpenCodeDecision::ReuseActive(active)
+    );
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_resolve_open_code_target_reuses_first_visible_code_pane() {
+    let first = PaneId::dummy_pane_id();
+    let second = PaneId::dummy_pane_id();
+
+    assert_eq!(
+        pane_group::resolve_open_code_target(
+            pane_group::ActivePaneKind::NonCode,
+            &[first, second],
+            pane_group::EditorLayout::NewTab,
+            true,
+        ),
+        pane_group::OpenCodeDecision::ReuseFirstVisible(first)
+    );
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_resolve_open_code_target_creates_new_tab_without_visible_code_pane() {
+    assert_eq!(
+        pane_group::resolve_open_code_target(
+            pane_group::ActivePaneKind::NonCode,
+            &[],
+            pane_group::EditorLayout::NewTab,
+            true,
+        ),
+        pane_group::OpenCodeDecision::CreateInNewTab
+    );
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_resolve_open_code_target_forces_split_without_visible_code_pane() {
+    assert_eq!(
+        pane_group::resolve_open_code_target(
+            pane_group::ActivePaneKind::NonCode,
+            &[],
+            pane_group::EditorLayout::SplitPane,
+            true,
+        ),
+        pane_group::OpenCodeDecision::CreateInNewSplit
+    );
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_resolve_open_code_target_split_layout_always_creates_split() {
+    let active = PaneId::dummy_pane_id();
+    let visible = PaneId::dummy_pane_id();
+
+    assert_eq!(
+        pane_group::resolve_open_code_target(
+            pane_group::ActivePaneKind::Code(active),
+            &[visible],
+            pane_group::EditorLayout::SplitPane,
+            true,
+        ),
+        pane_group::OpenCodeDecision::CreateInNewSplit
+    );
+
+    assert_eq!(
+        pane_group::resolve_open_code_target(
+            pane_group::ActivePaneKind::NonCode,
+            &[visible],
+            pane_group::EditorLayout::SplitPane,
+            true,
+        ),
+        pane_group::OpenCodeDecision::CreateInNewSplit
+    );
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_resolve_open_code_target_disabled_routing_uses_create_paths() {
+    let active = PaneId::dummy_pane_id();
+    let visible = PaneId::dummy_pane_id();
+
+    assert_eq!(
+        pane_group::resolve_open_code_target(
+            pane_group::ActivePaneKind::Code(active),
+            &[visible],
+            pane_group::EditorLayout::NewTab,
+            false,
+        ),
+        pane_group::OpenCodeDecision::CreateInNewTab
+    );
+
+    assert_eq!(
+        pane_group::resolve_open_code_target(
+            pane_group::ActivePaneKind::Code(active),
+            &[visible],
+            pane_group::EditorLayout::SplitPane,
+            false,
+        ),
+        pane_group::OpenCodeDecision::CreateInNewSplit
+    );
+}
+
 #[test]
 fn test_tab_renaming_editor_selections() {
     App::test((), |mut app| async move {
