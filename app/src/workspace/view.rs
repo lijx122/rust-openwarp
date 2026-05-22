@@ -6775,11 +6775,12 @@ impl Workspace {
         match open_decision {
             OpenCodeDecision::CreateCodePaneInCurrentTab => {
                 let focused_pane_id = self.active_tab_pane_group().as_ref(ctx).focused_pane_id(ctx);
+                let pane: Box<dyn AnyPaneContent> = Box::new(pane);
                 self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
                     pane_group.add_pane_sibling(
                         focused_pane_id,
                         Direction::Right,
-                        Box::new(pane),
+                        pane,
                         !preview,
                         ctx,
                     );
