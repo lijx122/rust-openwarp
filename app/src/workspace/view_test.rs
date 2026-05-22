@@ -526,7 +526,7 @@ fn test_resolve_open_code_target_reuses_first_visible_code_pane() {
 
 #[cfg(feature = "local_fs")]
 #[test]
-fn test_resolve_open_code_target_creates_new_tab_without_visible_code_pane() {
+fn test_resolve_open_code_target_creates_code_pane_in_current_tab_without_visible_code_pane() {
     assert_eq!(
         pane_group::resolve_open_code_target(
             pane_group::ActivePaneKind::NonCode,
@@ -534,7 +534,7 @@ fn test_resolve_open_code_target_creates_new_tab_without_visible_code_pane() {
             pane_group::EditorLayout::NewTab,
             true,
         ),
-        pane_group::OpenCodeDecision::CreateInNewTab
+        pane_group::OpenCodeDecision::CreateCodePaneInCurrentTab
     );
 }
 
@@ -712,7 +712,7 @@ fn test_open_file_with_target_reuses_visible_code_pane_when_active_pane_is_not_c
 
 #[cfg(feature = "local_fs")]
 #[test]
-fn test_open_file_with_target_creates_new_tab_when_no_visible_code_pane_exists() {
+fn test_open_file_with_target_creates_code_pane_in_current_tab_when_no_visible_code_pane_exists() {
     let _tabbed_editor_guard = FeatureFlag::TabbedEditorView.override_enabled(true);
 
     App::test((), |mut app| async move {
@@ -732,36 +732,88 @@ fn test_open_file_with_target_creates_new_tab_when_no_visible_code_pane_exists()
 
         workspace.update(&mut app, |workspace, ctx| {
             let tab_count_before = workspace.tab_count();
-            let pane_ids_before: Vec<_> = workspace
-                .active_tab_pane_group()
-                .as_ref(ctx)
-                .pane_ids()
-                .collect();
+            let pane_group = workspace.active_tab_pane_group();
+            let pane_ids_before: Vec<_> = pane_group.as_ref(ctx).pane_ids().collect();
+            let focused_before = pane_group.as_ref(ctx).focused_pane_id(ctx);
 
             workspace.open_file_with_target(
-                PathBuf::from("C:/tmp/create-tab.rs"),
+                PathBuf::from("C:/tmp/create-code-pane.rs"),
                 FileTarget::CodeEditor(pane_group::EditorLayout::NewTab),
                 None,
                 CodeSource::Link {
-                    path: PathBuf::from("C:/tmp/create-tab.rs"),
+                    path: PathBuf::from("C:/tmp/create-code-pane.rs"),
                     range_start: None,
                     range_end: None,
                 },
                 ctx,
             );
 
-            assert_eq!(workspace.tab_count(), tab_count_before + 1);
-            let new_tab = workspace.active_tab_pane_group();
-            assert_eq!(new_tab.as_ref(ctx).pane_count(), 1);
-            let new_pane = get_newly_created_pane_id(new_tab.as_ref(ctx), &pane_ids_before);
+            let pane_group = workspace.active_tab_pane_group();
+            assert_eq!(workspace.tab_count(), tab_count_before);
+            assert_eq!(pane_group.as_ref(ctx).pane_count(), pane_ids_before.len() + 1);
+            let new_pane = get_newly_created_pane_id(pane_group.as_ref(ctx), &pane_ids_before);
             assert!(new_pane.is_code_pane());
+            assert_ne!(new_pane, focused_before);
         });
     });
 }
 
 #[cfg(feature = "local_fs")]
 #[test]
-fn test_open_file_with_target_preview_path_reuses_active_code_pane_when_tabbed_editor_enabled() {
+fn test_cold_start_tabbed_editor_keeps_single_workspace_tab_and_accumulates_code_tabs() {
+    let _tabbed_editor_guard = FeatureFlag::TabbedEditorView.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(|ctx| {
+            EditorSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(settings
+                    .prefer_tabbed_editor_view
+                    .set_value(true, ctx));
+                report_if_error!(settings
+                    .open_file_layout
+                    .set_value(pane_group::EditorLayout::NewTab, ctx));
+            });
+        });
+
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let pane_group = workspace.active_tab_pane_group();
+            let pane_ids_before: Vec<_> = pane_group.as_ref(ctx).pane_ids().collect();
+
+            for path in [
+                PathBuf::from("C:/tmp/cold-start-1.rs"),
+                PathBuf::from("C:/tmp/cold-start-2.rs"),
+                PathBuf::from("C:/tmp/cold-start-3.rs"),
+            ] {
+                workspace.open_file_with_target(
+                    path.clone(),
+                    FileTarget::CodeEditor(pane_group::EditorLayout::NewTab),
+                    None,
+                    CodeSource::Link {
+                        path,
+                        range_start: None,
+                        range_end: None,
+                    },
+                    ctx,
+                );
+            }
+
+            let pane_group = workspace.active_tab_pane_group();
+            assert_eq!(workspace.tab_count(), 1);
+            assert_eq!(pane_group.as_ref(ctx).pane_count(), pane_ids_before.len() + 1);
+            let code_pane_id = get_newly_created_pane_id(pane_group.as_ref(ctx), &pane_ids_before);
+            assert!(code_pane_id.is_code_pane());
+            let code_view = pane_group
+                .as_ref(ctx)
+                .code_view_from_pane_id(code_pane_id, ctx)
+                .expect("expected code view");
+            assert_eq!(code_view.as_ref(ctx).tab_count(), 3);
+        });
+    });
+}
+
     let _tabbed_editor_guard = FeatureFlag::TabbedEditorView.override_enabled(true);
 
     App::test((), |mut app| async move {

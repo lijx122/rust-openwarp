@@ -6761,7 +6761,9 @@ impl Workspace {
                     }
                 }
             }
-            OpenCodeDecision::CreateInNewTab | OpenCodeDecision::CreateInNewSplit => {}
+            OpenCodeDecision::CreateCodePaneInCurrentTab
+            | OpenCodeDecision::CreateInNewTab
+            | OpenCodeDecision::CreateInNewSplit => {}
         }
 
         let pane = if preview {
@@ -6771,6 +6773,18 @@ impl Workspace {
         };
 
         match open_decision {
+            OpenCodeDecision::CreateCodePaneInCurrentTab => {
+                let focused_pane_id = self.active_tab_pane_group().as_ref(ctx).focused_pane_id(ctx);
+                self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
+                    pane_group.add_pane_sibling(
+                        focused_pane_id,
+                        Direction::Right,
+                        Box::new(pane),
+                        !preview,
+                        ctx,
+                    );
+                });
+            }
             OpenCodeDecision::CreateInNewTab => {
                 let new_tab_placement_setting = TabSettings::as_ref(ctx).new_tab_placement;
                 let new_idx = match new_tab_placement_setting {

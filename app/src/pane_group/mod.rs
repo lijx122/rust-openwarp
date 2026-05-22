@@ -971,6 +971,7 @@ pub enum ActivePaneKind {
 pub enum OpenCodeDecision {
     ReuseActive(PaneId),
     ReuseFirstVisible(PaneId),
+    CreateCodePaneInCurrentTab,
     CreateInNewSplit,
     CreateInNewTab,
 }
@@ -981,10 +982,6 @@ pub fn resolve_open_code_target(
     layout: EditorLayout,
     tabbed_editor_routing_enabled: bool,
 ) -> OpenCodeDecision {
-    if matches!(layout, EditorLayout::SplitPane) {
-        return OpenCodeDecision::CreateInNewSplit;
-    }
-
     if !tabbed_editor_routing_enabled {
         return match layout {
             EditorLayout::NewTab => OpenCodeDecision::CreateInNewTab,
@@ -992,13 +989,23 @@ pub fn resolve_open_code_target(
         };
     }
 
-    match active_pane_kind {
-        ActivePaneKind::Code(pane_id) => OpenCodeDecision::ReuseActive(pane_id),
-        ActivePaneKind::NonCode => visible_code_panes
-            .first()
-            .copied()
-            .map(OpenCodeDecision::ReuseFirstVisible)
-            .unwrap_or(OpenCodeDecision::CreateInNewTab),
+    match (active_pane_kind, visible_code_panes.first().copied(), layout) {
+        (ActivePaneKind::Code(pane_id), _, EditorLayout::NewTab) => {
+            OpenCodeDecision::ReuseActive(pane_id)
+        }
+        (ActivePaneKind::Code(_), _, EditorLayout::SplitPane) => OpenCodeDecision::CreateInNewSplit,
+        (ActivePaneKind::NonCode, Some(pane_id), EditorLayout::NewTab) => {
+            OpenCodeDecision::ReuseFirstVisible(pane_id)
+        }
+        (ActivePaneKind::NonCode, Some(_), EditorLayout::SplitPane) => {
+            OpenCodeDecision::CreateInNewSplit
+        }
+        (ActivePaneKind::NonCode, None, EditorLayout::NewTab) => {
+            OpenCodeDecision::CreateCodePaneInCurrentTab
+        }
+        (ActivePaneKind::NonCode, None, EditorLayout::SplitPane) => {
+            OpenCodeDecision::CreateInNewSplit
+        }
     }
 }
 
