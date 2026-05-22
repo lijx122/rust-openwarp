@@ -9,7 +9,7 @@ use repo_metadata::{FileMetadata, FileTreeEntry};
 use std::cmp::Ordering;
 use std::sync::Arc;
 use warp_util::standardized_path::StandardizedPath;
-use warpui::{elements::MouseStateHandle, ViewContext};
+use warpui::{elements::MouseStateHandle, SingletonEntity as _, ViewContext};
 
 use super::{FileTreeIdentifier, FileTreeItem, FileTreeView};
 use crate::{
@@ -281,58 +281,48 @@ impl FileTreeView {
                             );
                         }
                         super::RemoteActionBackend::SftpCli => {
-                            crate::ssh_manager::SftpBrowserModel::handle(ctx).update(
-                                ctx,
-                                |model, ctx| {
-                                    model.run_ssh_command_for_host(
-                                        host_id.clone(),
+                            let Some(server) = crate::ssh_manager::SftpBrowserModel::as_ref(ctx)
+                                .server_for_host(&host_id)
+                            else {
+                                return;
+                            };
+                            let keepalive =
+                                crate::settings::SshSettings::as_ref(ctx).keepalive_options();
+                            let _ = ctx.spawn(
+                                async move {
+                                    crate::ssh_manager::sftp_browser_model::run_ssh_command_for_server(
+                                        server,
                                         command,
-                                        ctx,
-                                        move |model, result, ctx| match result {
-                                            Ok(output) if output.status.success() => {
-                                                let Ok(repo_root) =
-                                                    StandardizedPath::try_with_encoding(
-                                                        &repo_root,
-                                                        typed_path::PathType::Unix,
-                                                    )
-                                                else {
-                                                    return;
-                                                };
-                                                let Ok(refresh_dir) =
-                                                    StandardizedPath::try_with_encoding(
-                                                        &refresh_dir,
-                                                        typed_path::PathType::Unix,
-                                                    )
-                                                else {
-                                                    return;
-                                                };
-                                                model.load_directory(
-                                                    host_id.clone(),
-                                                    repo_root,
-                                                    refresh_dir,
-                                                    ctx,
-                                                );
-                                                ctx.emit(FileTreeEvent::FileRenamed {
-                                                    old_path: old_std_path.to_local_path_lossy(),
-                                                    new_path: new_std_path.to_local_path_lossy(),
-                                                });
-                                            }
-                                            Ok(output) => {
-                                                let stderr =
-                                                    String::from_utf8_lossy(&output.stderr);
-                                                FileTreeView::show_remote_error_toast(
-                                                    ctx,
-                                                    format!("远程重命名失败: {stderr}"),
-                                                );
-                                            }
-                                            Err(error) => {
-                                                FileTreeView::show_remote_error_toast(
-                                                    ctx,
-                                                    format!("远程重命名失败: {error:#}"),
-                                                );
-                                            }
-                                        },
-                                    );
+                                        keepalive,
+                                    )
+                                    .await
+                                },
+                                move |me, result, ctx| match result {
+                                    Ok(output) if output.status.success() => {
+                                        me.refresh_remote_directory(
+                                            host_id.clone(),
+                                            repo_root.clone(),
+                                            refresh_dir.clone(),
+                                            ctx,
+                                        );
+                                        ctx.emit(FileTreeEvent::FileRenamed {
+                                            old_path: old_std_path.to_local_path_lossy(),
+                                            new_path: new_std_path.to_local_path_lossy(),
+                                        });
+                                    }
+                                    Ok(output) => {
+                                        let stderr = String::from_utf8_lossy(&output.stderr);
+                                        FileTreeView::show_remote_error_toast(
+                                            ctx,
+                                            format!("远程重命名失败: {stderr}"),
+                                        );
+                                    }
+                                    Err(error) => {
+                                        FileTreeView::show_remote_error_toast(
+                                            ctx,
+                                            format!("远程重命名失败: {error:#}"),
+                                        );
+                                    }
                                 },
                             );
                         }

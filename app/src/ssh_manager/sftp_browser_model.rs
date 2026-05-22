@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use async_io::Timer;
 use command::{r#async::Command, Output, Stdio};
 use futures_lite::{future, io::AsyncWriteExt};
 use repo_metadata::file_tree_update::{
@@ -43,6 +44,10 @@ impl SftpBrowserModel {
 
     pub fn is_managed_host(&self, host_id: &HostId) -> bool {
         self.hosts.contains_key(host_id)
+    }
+
+    pub fn server_for_host(&self, host_id: &HostId) -> Option<SshServerInfo> {
+        self.hosts.get(host_id).map(|host| host.server.clone())
     }
 
     pub fn run_batch_for_host(
@@ -189,6 +194,22 @@ pub struct SftpEntry {
     is_dir: bool,
 }
 
+pub async fn run_sftp_batch_for_server(
+    server: SshServerInfo,
+    batch: String,
+    keepalive: remote_server::ssh::SshKeepaliveOptions,
+) -> Result<Output> {
+    run_sftp_batch(&server, &batch, SFTP_OPERATION_TIMEOUT, keepalive).await
+}
+
+pub async fn run_ssh_command_for_server(
+    server: SshServerInfo,
+    remote_command: String,
+    keepalive: remote_server::ssh::SshKeepaliveOptions,
+) -> Result<Output> {
+    run_ssh_command(&server, &remote_command, SFTP_OPERATION_TIMEOUT, keepalive).await
+}
+
 fn update_for_directory(
     repo_root: StandardizedPath,
     dir_path: StandardizedPath,
@@ -271,7 +292,7 @@ async fn run_sftp_batch(
                 .context("failed to collect sftp output")
         },
         async move {
-            futures_timer::Delay::new(timeout).await;
+            Timer::after(timeout).await;
             Err(anyhow!("sftp batch timed out after {timeout:?}"))
         },
     )
@@ -313,7 +334,7 @@ async fn run_ssh_command(
                 .context("failed to collect ssh output")
         },
         async move {
-            futures_timer::Delay::new(timeout).await;
+            Timer::after(timeout).await;
             Err(anyhow!("ssh command timed out after {timeout:?}"))
         },
     )
