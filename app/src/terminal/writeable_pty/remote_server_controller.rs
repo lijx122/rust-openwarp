@@ -1,4 +1,4 @@
-﻿use crate::auth::AuthStateProvider;
+use crate::auth::AuthStateProvider;
 use crate::remote_server::auth_context::server_api_auth_context;
 use instant::Instant;
 use remote_server::auth::RemoteServerAuthContext;
@@ -14,6 +14,7 @@ use crate::remote_server::manager::{RemoteServerManager, RemoteServerManagerEven
 use crate::remote_server::ssh_transport::SshTransport;
 // OpenWarp Wave 3-1:`ServerApiProvider` 不再被本文件使用 — `auth_client`
 // 调用点随 AuthClient 一同物理删。
+use crate::settings::SshSettings;
 use crate::terminal::model::session::{IsLegacySSHSession, SessionInfo};
 use crate::terminal::model_events::{ModelEvent, ModelEventDispatcher};
 use crate::terminal::warpify::settings::WarpifySettings;
@@ -135,6 +136,7 @@ impl<T: EventLoopSender> RemoteServerController<T> {
             }
             RemoteServerManagerEvent::SessionConnecting { .. }
             | RemoteServerManagerEvent::SessionDisconnected { .. }
+            | RemoteServerManagerEvent::SessionReconnectStarted { .. }
             | RemoteServerManagerEvent::SessionReconnected { .. }
             | RemoteServerManagerEvent::SessionDeregistered { .. }
             | RemoteServerManagerEvent::HostConnected { .. }
@@ -200,7 +202,9 @@ impl<T: EventLoopSender> RemoteServerController<T> {
                 self.flush_stashed_bootstrap(old_info, ctx);
             }
         }
-        let transport = SshTransport::new(socket_path, self.auth_context.clone());
+        let keepalive_options = SshSettings::as_ref(ctx).keepalive_options();
+        let transport =
+            SshTransport::new(socket_path, self.auth_context.clone(), keepalive_options);
         self.did_install = false;
         self.remote_platform = None;
         self.preinstall_check = None;
@@ -516,7 +520,9 @@ impl<T: EventLoopSender> RemoteServerController<T> {
         socket_path: PathBuf,
         ctx: &mut ModelContext<Self>,
     ) {
-        let transport = SshTransport::new(socket_path, self.auth_context.clone());
+        let keepalive_options = SshSettings::as_ref(ctx).keepalive_options();
+        let transport =
+            SshTransport::new(socket_path, self.auth_context.clone(), keepalive_options);
         let auth_context = self.auth_context.clone();
         RemoteServerManager::handle(ctx).update(ctx, |mgr, ctx| {
             mgr.connect_session(session_id, transport, auth_context, ctx);

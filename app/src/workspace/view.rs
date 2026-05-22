@@ -5324,6 +5324,9 @@ impl Workspace {
             log::warn!("open_ssh_terminal: no terminal in newly added tab");
             return;
         };
+        crate::ssh_manager::SshConnectionModel::handle(ctx).update(ctx, |model, ctx| {
+            model.start_connect(node_id.clone(), terminal_view.id(), ctx);
+        });
 
         if AISettings::as_ref(ctx).default_session_mode(ctx) == DefaultSessionMode::Agent {
             terminal_view.update(ctx, |view, _| {

@@ -2,8 +2,8 @@
 //! + 文件夹内联重命名。
 //!
 //! UX 规则:
-//! - **单击 server**:直接连接(打开 terminal pane 跑 ssh)。要编辑用右键。
-//! - **单击 folder**:仅选中(高亮);编辑名走右键 "重命名" 或新建后立刻输入。
+//! - **单击 server**:仅选中;连接走双击或右键。
+//! - **单击 folder**:选中 + 折叠/展开切换。
 //! - **新建文件夹后立即进入重命名态**(Drive 风格)。
 //! - 右键 server:编辑 / 连接 / 删除
 //! - 右键 folder:新建文件夹 / 新建服务器 / 重命名 / 删除
@@ -15,12 +15,13 @@
 use std::collections::HashMap;
 
 use pathfinder_geometry::vector::Vector2F;
+use repo_metadata::RepoMetadataModel;
 use warp_core::ui::theme::color::internal_colors;
 use warpui::elements::{
-    AcceptedByDropTarget, Border, ChildAnchor, ConstrainedBox, Container, CornerRadius,
+    AcceptedByDropTarget, Border, ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius,
     CrossAxisAlignment, Dismiss, Draggable, DraggableState, DropTarget, DropTargetData, Element,
     Empty, Flex, Hoverable, MainAxisSize, MouseStateHandle, OffsetPositioning, ParentAnchor,
-    ParentElement, ParentOffsetBounds, Radius, SavePosition, Stack, Text,
+    ParentElement, ParentOffsetBounds, Radius, SavePosition, Shrinkable, Stack, Text,
 };
 use warpui::platform::Cursor;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
@@ -34,10 +35,14 @@ use warp_ssh_manager::{
     SshServerInfo,
 };
 
+use crate::code::file_tree::{FileTreeEvent, FileTreeView};
+use crate::coding_panel_enablement_state::CodingPanelEnablementState;
 use crate::editor::{
     EditorView, Event as EditorEvent, SingleLineEditorOptions, TextColors, TextOptions,
 };
-use crate::ssh_manager::{SshTreeChangedEvent, SshTreeChangedNotifier};
+use crate::ssh_manager::{
+    SshConnectionModel, SshConnectionState, SshTreeChangedEvent, SshTreeChangedNotifier,
+};
 
 // ---- 视觉常量(参考 Drive) ----
 const ITEM_FONT_SIZE: f32 = 14.0;
@@ -65,7 +70,7 @@ pub enum SshManagerPanelAction {
     Connect,
     Edit,
     /// 单击行,处理逻辑根据 node 种类:
-    /// - server: 选中 + emit OpenSshTerminal(直接连接)
+    /// - server: 仅选中
     /// - folder: 仅选中
     Click(String),
     StartRename(String),
@@ -91,6 +96,7 @@ pub enum SshManagerPanelAction {
 
 #[derive(Clone, Debug)]
 pub enum SshManagerPanelEvent {
+    FileTree(FileTreeEvent),
     /// 用户右键 "编辑" 选了个 server,中央 pane 应打开/聚焦该 server 的编辑
     /// (`Workspace::open_ssh_server`)。
     OpenServerEditor {
@@ -129,6 +135,9 @@ pub struct SshManagerPanel {
     nodes: Vec<SshNode>,
     depths: HashMap<String, usize>,
     selected_id: Option<String>,
+    file_tree_view: ViewHandle<FileTreeView>,
+    is_active: bool,
+    is_file_tree_active: bool,
 
     add_folder_btn: MouseStateHandle,
     add_server_btn: MouseStateHandle,
@@ -147,10 +156,30 @@ pub struct SshManagerPanel {
 
 impl SshManagerPanel {
     pub fn new(ctx: &mut ViewContext<Self>) -> Self {
+        let file_tree_view = ctx.add_typed_action_view(FileTreeView::new);
+        file_tree_view.update(ctx, |view, ctx| {
+            view.set_enablement_state(
+                CodingPanelEnablementState::RemoteSession {
+                    has_remote_server: true,
+                },
+                ctx,
+            );
+        });
+        ctx.subscribe_to_view(&file_tree_view, |me, _, event, ctx| {
+            ctx.emit(SshManagerPanelEvent::FileTree(event.clone()));
+            me.handle_file_tree_event(event, ctx);
+        });
+        ctx.subscribe_to_model(&SshConnectionModel::handle(ctx), |me, _, _, ctx| {
+            me.handle_connection_model_changed(ctx);
+        });
+
         let mut me = Self {
             nodes: Vec::new(),
             depths: HashMap::new(),
             selected_id: None,
+            file_tree_view,
+            is_active: false,
+            is_file_tree_active: false,
             add_folder_btn: MouseStateHandle::default(),
             add_server_btn: MouseStateHandle::default(),
             toggle_all_btn: MouseStateHandle::default(),
@@ -209,7 +238,88 @@ impl SshManagerPanel {
             self.row_drag_states.entry(n.id.clone()).or_default();
         }
 
+        self.sync_selected_server_file_tree_state(ctx);
         ctx.notify();
+    }
+
+    fn handle_connection_model_changed(&mut self, ctx: &mut ViewContext<Self>) {
+        self.sync_selected_server_file_tree_state(ctx);
+        ctx.notify();
+    }
+
+    fn handle_file_tree_event(&mut self, _event: &FileTreeEvent, _ctx: &mut ViewContext<Self>) {}
+
+    pub fn set_is_active(&mut self, is_active: bool, ctx: &mut ViewContext<Self>) {
+        if self.is_active == is_active {
+            return;
+        }
+
+        self.is_active = is_active;
+        ctx.notify();
+    }
+
+    pub fn set_file_tree_is_active(&mut self, is_active: bool, ctx: &mut ViewContext<Self>) {
+        if self.is_file_tree_active == is_active {
+            return;
+        }
+
+        self.is_file_tree_active = is_active;
+        self.file_tree_view.update(ctx, |view, ctx| {
+            view.set_is_active(is_active, ctx);
+        });
+    }
+
+    fn connected_host_id(&self, ctx: &AppContext) -> Option<&str> {
+        let selected_id = self.selected_id.as_deref()?;
+        let connection = SshConnectionModel::as_ref(ctx).connection_for_node(selected_id)?;
+        let host_id = connection.host_id.as_deref()?;
+
+        matches!(
+            connection.state,
+            SshConnectionState::Connected | SshConnectionState::Reconnecting
+        )
+        .then_some(host_id)
+    }
+
+    fn sync_selected_server_file_tree_state(&mut self, ctx: &mut ViewContext<Self>) {
+        let remote_roots = self.collect_remote_root_directories(ctx);
+        let enablement = CodingPanelEnablementState::RemoteSession {
+            has_remote_server: self.connected_host_id(ctx).is_some() && !remote_roots.is_empty(),
+        };
+
+        self.file_tree_view.update(ctx, |view, ctx| {
+            view.set_enablement_state(enablement, ctx);
+            view.set_remote_root_directories(&remote_roots, ctx);
+        });
+    }
+
+    fn collect_remote_root_directories(
+        &self,
+        ctx: &AppContext,
+    ) -> Vec<repo_metadata::RemoteRepositoryIdentifier> {
+        let repo_model = RepoMetadataModel::as_ref(ctx);
+        let available_repo_ids: Vec<_> = repo_model.remote_repository_ids(ctx).cloned().collect();
+
+        let Some(selected_id) = self.selected_id.as_deref() else {
+            return Vec::new();
+        };
+        let Some(connection) = SshConnectionModel::as_ref(ctx).connection_for_node(selected_id)
+        else {
+            return Vec::new();
+        };
+        let Some(host_id) = connection.host_id.as_ref() else {
+            return Vec::new();
+        };
+
+        match connection.state {
+            SshConnectionState::Connected | SshConnectionState::Reconnecting => available_repo_ids
+                .into_iter()
+                .filter(|remote_id| &remote_id.host_id == host_id)
+                .collect(),
+            SshConnectionState::Disconnected
+            | SshConnectionState::Connecting
+            | SshConnectionState::Failed => Vec::new(),
+        }
     }
 
     fn on_add_folder(&mut self, ctx: &mut ViewContext<Self>) {
@@ -411,6 +521,7 @@ impl SshManagerPanel {
         }
 
         self.selected_id = Some(id.clone());
+        self.sync_selected_server_file_tree_state(ctx);
         let kind = self.nodes.iter().find(|n| n.id == id).map(|n| n.kind);
         match kind {
             Some(NodeKind::Server) => {
@@ -695,8 +806,56 @@ impl SshManagerPanel {
             .finish()
     }
 
-    fn render_tree(&self, appearance: &warp_core::ui::appearance::Appearance) -> Box<dyn Element> {
+    fn render_connection_badge(
+        &self,
+        node_id: &str,
+        appearance: &warp_core::ui::appearance::Appearance,
+        app: &AppContext,
+    ) -> Option<Box<dyn Element>> {
+        let connection = SshConnectionModel::as_ref(app).connection_for_node(node_id)?;
+        let theme = appearance.theme();
+
+        let (label, color) = match connection.state {
+            SshConnectionState::Connected => ("Connected", theme.success()),
+            SshConnectionState::Reconnecting => ("Reconnecting", theme.warning()),
+            SshConnectionState::Failed => ("Failed", theme.error()),
+            SshConnectionState::Connecting => ("Connecting", theme.accent()),
+            SshConnectionState::Disconnected => return None,
+        };
+
+        Some(
+            Container::new(
+                Text::new_inline(label, appearance.ui_font_family(), 11.0)
+                    .with_color(color.into())
+                    .finish(),
+            )
+            .with_padding_top(2.0)
+            .with_padding_bottom(2.0)
+            .with_padding_left(6.0)
+            .with_padding_right(6.0)
+            .with_background(theme.surface_2())
+            .with_border(Border::all(1.0).with_border_color(color.into()))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(999.0)))
+            .finish(),
+        )
+    }
+
+    fn render_tree(
+        &self,
+        appearance: &warp_core::ui::appearance::Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let show_file_tree = self.is_file_tree_active
+            && self.connected_host_id(app).is_some()
+            && !self.collect_remote_root_directories(app).is_empty();
         let mut col = Flex::column();
+
+        if show_file_tree {
+            let file_tree = Container::new(ChildView::new(&self.file_tree_view).finish())
+                .with_padding_bottom(8.0)
+                .finish();
+            col.add_child(file_tree);
+        }
 
         if self.nodes.is_empty() {
             let theme = appearance.theme();
@@ -722,7 +881,7 @@ impl SshManagerPanel {
                 if !self.is_visible(node) {
                     continue;
                 }
-                col.add_child(self.render_row(node, appearance));
+                col.add_child(self.render_row(node, appearance, app));
             }
         }
         let inner = col
@@ -751,6 +910,7 @@ impl SshManagerPanel {
         &self,
         node: &SshNode,
         appearance: &warp_core::ui::appearance::Appearance,
+        app: &AppContext,
     ) -> Box<dyn Element> {
         let theme = appearance.theme();
         let depth = self.depths.get(&node.id).copied().unwrap_or(0);
@@ -830,7 +990,11 @@ impl SshManagerPanel {
             .finish()
         };
 
-        let row = Flex::row()
+        let connection_badge = matches!(node.kind, NodeKind::Server)
+            .then(|| self.render_connection_badge(&node.id, appearance, app))
+            .flatten();
+
+        let mut row = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(ITEM_ICON_TEXT_SPACING)
             .with_child(
@@ -840,9 +1004,14 @@ impl SshManagerPanel {
             )
             .with_child(chevron_el)
             .with_child(icon_el)
-            .with_child(label_or_editor)
-            .with_main_axis_size(MainAxisSize::Min)
-            .finish();
+            .with_child(label_or_editor);
+
+        if let Some(badge) = connection_badge {
+            row.add_child(Shrinkable::new(1.0, Empty::new().finish()).finish());
+            row.add_child(badge);
+        }
+
+        let row = row.with_main_axis_size(MainAxisSize::Max).finish();
 
         let state = self.row_states.get(&node.id).cloned().unwrap_or_default();
         let id_for_click = node.id.clone();
@@ -1101,7 +1270,7 @@ impl View for SshManagerPanel {
             .with_uniform_padding(8.0)
             .finish();
 
-        let tree = Container::new(self.render_tree(appearance))
+        let tree = Container::new(self.render_tree(appearance, app))
             .with_padding_left(PANEL_HORIZONTAL_PADDING - ITEM_PADDING_HORIZONTAL)
             .with_padding_right(PANEL_HORIZONTAL_PADDING - ITEM_PADDING_HORIZONTAL)
             .finish();
