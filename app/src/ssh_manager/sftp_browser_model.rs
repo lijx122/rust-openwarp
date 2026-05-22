@@ -142,6 +142,7 @@ impl SftpBrowserModel {
             return;
         };
         let keepalive = SshSettings::as_ref(ctx).keepalive_options();
+        let node_id_for_success = node_id.clone();
         ctx.spawn(
             async move {
                 let output = run_sftp_batch(
@@ -163,9 +164,9 @@ impl SftpBrowserModel {
                     StandardizedPath::try_with_encoding(&root, typed_path::PathType::Unix)
                         .with_context(|| format!("invalid remote root path: {root}"))?;
                 let entries = parse_sftp_ls(&stdout, &root_path)?;
-                Ok((node_id, host_id, root_path, entries))
+                Ok((node_id_for_success, host_id, root_path, entries))
             },
-            |_, result, ctx| match result {
+            move |_, result, ctx| match result {
                 Ok((node_id, host_id, root_path, entries)) => {
                     let update = update_for_directory(root_path.clone(), root_path, entries);
                     repo_metadata::RepoMetadataModel::handle(ctx).update(ctx, |model, ctx| {
