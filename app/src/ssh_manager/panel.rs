@@ -269,10 +269,10 @@ impl SshManagerPanel {
         });
     }
 
-    fn connected_host_id(&self, ctx: &AppContext) -> Option<&str> {
+    fn connected_host_id(&self, ctx: &AppContext) -> Option<String> {
         let selected_id = self.selected_id.as_deref()?;
         let connection = SshConnectionModel::as_ref(ctx).connection_for_node(selected_id)?;
-        let host_id = connection.host_id.as_ref()?.as_str();
+        let host_id = connection.host_id.as_ref()?.as_str().to_owned();
 
         matches!(
             connection.state,
