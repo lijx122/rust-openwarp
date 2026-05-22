@@ -16,6 +16,7 @@ use warp_util::standardized_path::StandardizedPath;
 use warpui::{Entity, ModelContext, SingletonEntity};
 
 use crate::settings::SshSettings;
+use crate::ssh_manager::SshConnectionModel;
 
 const SFTP_CONNECT_TIMEOUT_SECS: u64 = 15;
 const SFTP_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
@@ -37,9 +38,10 @@ impl SftpBrowserModel {
     }
 
     pub fn connect(&mut self, server: SshServerInfo, ctx: &mut ModelContext<Self>) {
-        let host_id = Self::host_id_for_node(&server.node_id);
+        let node_id = server.node_id.clone();
+        let host_id = Self::host_id_for_node(&node_id);
         self.hosts.insert(host_id.clone(), SftpHost { server });
-        self.load_initial_root(host_id, ctx);
+        self.load_initial_root(node_id, host_id, ctx);
     }
 
     pub fn is_managed_host(&self, host_id: &HostId) -> bool {
@@ -135,7 +137,7 @@ impl SftpBrowserModel {
         );
     }
 
-    fn load_initial_root(&self, host_id: HostId, ctx: &mut ModelContext<Self>) {
+    fn load_initial_root(&self, node_id: String, host_id: HostId, ctx: &mut ModelContext<Self>) {
         let Some(host) = self.hosts.get(&host_id).cloned() else {
             return;
         };
@@ -161,16 +163,23 @@ impl SftpBrowserModel {
                     StandardizedPath::try_with_encoding(&root, typed_path::PathType::Unix)
                         .with_context(|| format!("invalid remote root path: {root}"))?;
                 let entries = parse_sftp_ls(&stdout, &root_path)?;
-                Ok((host_id, root_path, entries))
+                Ok((node_id, host_id, root_path, entries))
             },
             |_, result, ctx| match result {
-                Ok((host_id, root_path, entries)) => {
+                Ok((node_id, host_id, root_path, entries)) => {
                     let update = update_for_directory(root_path.clone(), root_path, entries);
                     repo_metadata::RepoMetadataModel::handle(ctx).update(ctx, |model, ctx| {
-                        model.insert_remote_snapshot(host_id, &update, ctx);
+                        model.insert_remote_snapshot(host_id.clone(), &update, ctx);
+                    });
+                    SshConnectionModel::handle(ctx).update(ctx, |model, ctx| {
+                        model.mark_connected_with_host_id(node_id, host_id, ctx);
                     });
                 }
                 Err(error) => {
+                    let reason = format!("{error:#}");
+                    SshConnectionModel::handle(ctx).update(ctx, |model, ctx| {
+                        model.mark_failed(node_id.clone(), reason.clone(), ctx);
+                    });
                     log::warn!("sftp initial root load failed: {error:#}");
                 }
             },

@@ -71,6 +71,31 @@ impl SshConnectionModel {
         ctx.notify();
     }
 
+    pub fn mark_connected_with_host_id(
+        &mut self,
+        node_id: String,
+        host_id: HostId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let Some(connection) = self.node_connections.get_mut(&node_id) else {
+            log::warn!("ssh connection missing for node {node_id} while marking connected");
+            return;
+        };
+        connection.host_id = Some(host_id);
+        connection.state = SshConnectionState::Connected;
+        ctx.notify();
+    }
+
+    pub fn mark_failed(&mut self, node_id: String, reason: String, ctx: &mut ModelContext<Self>) {
+        let Some(connection) = self.node_connections.get_mut(&node_id) else {
+            log::warn!("ssh connection missing for node {node_id} while marking failed: {reason}");
+            return;
+        };
+        connection.state = SshConnectionState::Failed;
+        Self::push_disconnect_record(&mut connection.recent_disconnects, reason);
+        ctx.notify();
+    }
+
     pub fn bind_terminal_session(
         &mut self,
         terminal_view_id: EntityId,
