@@ -11172,9 +11172,14 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) {
         let session_id = bootstrap_event.session_id;
-        crate::ssh_manager::SshConnectionModel::handle(ctx).update(ctx, |model, ctx| {
-            model.bind_terminal_session(self.id(), session_id, ctx);
-        });
+        if matches!(
+            bootstrap_event.session_type,
+            BootstrapSessionType::WarpifiedRemote
+        ) {
+            crate::ssh_manager::SshConnectionModel::handle(ctx).update(ctx, |model, ctx| {
+                model.bind_terminal_session(self.id(), session_id, ctx);
+            });
+        }
         let Some(session) = self.sessions.as_ref(ctx).get(session_id) else {
             log::error!(
                 "Could not find session {session_id:?} in sessions model after \
