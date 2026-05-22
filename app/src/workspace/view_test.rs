@@ -814,6 +814,9 @@ fn test_cold_start_tabbed_editor_keeps_single_workspace_tab_and_accumulates_code
     });
 }
 
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_open_file_with_target_preview_path_reuses_active_code_pane_when_tabbed_editor_enabled() {
     let _tabbed_editor_guard = FeatureFlag::TabbedEditorView.override_enabled(true);
 
     App::test((), |mut app| async move {
