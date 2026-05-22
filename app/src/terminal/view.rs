@@ -4094,6 +4094,13 @@ impl TerminalView {
                         indexed_path,
                         ..
                     } => {
+                        tracing::info!(
+                            target: "remote_navigation",
+                            path = ?indexed_path,
+                            session_id = ?nav_session_id,
+                            host_id = ?host_id,
+                            "NavigatedToDirectory: path={indexed_path:?}, session={nav_session_id:?}"
+                        );
                         // Check if this navigation belongs to our active session
                         // using exact session_id match (no CWD heuristics).
                         let is_relevant = me
@@ -11176,6 +11183,11 @@ impl TerminalView {
             bootstrap_event.session_type,
             BootstrapSessionType::WarpifiedRemote
         ) {
+            tracing::info!(
+                target: "warpify_bootstrap",
+                session_id = ?session_id,
+                "warpify bootstrap complete, session_id={session_id:?}"
+            );
             crate::ssh_manager::SshConnectionModel::handle(ctx).update(ctx, |model, ctx| {
                 model.bind_terminal_session(self.id(), session_id, ctx);
             });

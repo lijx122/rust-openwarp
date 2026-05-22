@@ -845,9 +845,24 @@ impl SshManagerPanel {
         appearance: &warp_core::ui::appearance::Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
-        let show_file_tree = self.is_file_tree_active
-            && self.connected_host_id(app).is_some()
-            && !self.collect_remote_root_directories(app).is_empty();
+        let selected_id = self.selected_id.as_deref();
+        let connection =
+            selected_id.and_then(|id| SshConnectionModel::as_ref(app).connection_for_node(id));
+        let current_host_id = connection.and_then(|connection| connection.host_id.as_ref());
+        let current_state = connection.map(|connection| &connection.state);
+        let remote_roots = self.collect_remote_root_directories(app);
+        let first_root_path = remote_roots.first().map(|root| &root.path);
+        tracing::info!(
+            target: "ssh_manager_panel",
+            selected_id = ?selected_id,
+            host_id = ?current_host_id,
+            connection_state = ?current_state,
+            remote_roots_len = remote_roots.len(),
+            first_root_path = ?first_root_path,
+            "ssh manager panel render state"
+        );
+        let show_file_tree =
+            self.is_file_tree_active && current_host_id.is_some() && !remote_roots.is_empty();
         let mut col = Flex::column();
 
         if show_file_tree {
