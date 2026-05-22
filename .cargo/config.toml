@@ -9,10 +9,18 @@
 MACOSX_DEPLOYMENT_TARGET = "10.14"
 
 [build]
-rustflags = ["-C", "symbol-mangling-version=v0", "-C", "link-args=-Wl,-headerpad_max_install_names"]
+rustflags = ["-C", "symbol-mangling-version=v0"]
 
 [net]
 git-fetch-with-cli = true
 
 [target.'cfg(target_family = "wasm")']
 rustflags = ["--cfg=web_sys_unstable_apis"]
+
+[target.'cfg(target_vendor = "apple")']
+rustflags = [
+    "-C",
+    "symbol-mangling-version=v0",
+    "-C",
+    "link-args=-Wl,-headerpad_max_install_names",
+]

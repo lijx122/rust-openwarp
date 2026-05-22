@@ -216,6 +216,67 @@ impl FileTreeView {
                 let old_std_path = item.path().clone();
                 let mut new_std_path = old_std_path.clone();
                 new_std_path.set_file_name(&buffer_content);
+                if new_std_path == old_std_path {
+                    self.rebuild_flatten_items_and_select_path(Some(&file_tree_id), None);
+                    ctx.notify();
+                    return;
+                }
+
+                if self.is_remote_item(&file_tree_id) {
+                    let Some(target) = self.remote_action_target(&file_tree_id, ctx) else {
+                        return;
+                    };
+                    let command = format!(
+                        "mv -- {} {}",
+                        shell_words::quote(&target.target_path),
+                        shell_words::quote(&new_std_path.to_string())
+                    );
+                    let control_path = target.control_path.clone();
+                    let keepalive_options = target.keepalive_options.clone();
+                    let host_id = target.host_id.clone();
+                    let repo_root = target.repo_root.clone();
+                    let refresh_dir = target.refresh_dir.clone();
+
+                    let _ = ctx.spawn(
+                        async move {
+                            remote_server::ssh::run_ssh_command_with_options(
+                                &control_path,
+                                &command,
+                                super::REMOTE_TRANSFER_TIMEOUT,
+                                &keepalive_options,
+                            )
+                            .await
+                        },
+                        move |me, result, ctx| match result {
+                            Ok(output) if output.status.success() => {
+                                me.refresh_remote_directory(
+                                    host_id.clone(),
+                                    repo_root.clone(),
+                                    refresh_dir.clone(),
+                                    ctx,
+                                );
+                                ctx.emit(FileTreeEvent::FileRenamed {
+                                    old_path: old_std_path.to_local_path_lossy(),
+                                    new_path: new_std_path.to_local_path_lossy(),
+                                });
+                            }
+                            Ok(output) => {
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                FileTreeView::show_remote_error_toast(
+                                    ctx,
+                                    format!("远程重命名失败: {stderr}"),
+                                );
+                            }
+                            Err(error) => {
+                                FileTreeView::show_remote_error_toast(
+                                    ctx,
+                                    format!("远程重命名失败: {error:#}"),
+                                );
+                            }
+                        },
+                    );
+                    return;
+                }
 
                 let old_path = old_std_path.to_local_path_lossy();
                 let new_path = new_std_path.to_local_path_lossy();

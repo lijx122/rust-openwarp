@@ -3,11 +3,13 @@
 //!
 //! 数据层在独立 crate `warp_ssh_manager`(`crates/warp_ssh_manager/`)。
 
+pub mod connection_model;
 pub mod notifier;
 pub mod panel;
 pub mod secret_injector;
 pub mod server_view;
 
+pub use connection_model::{SshConnectionModel, SshConnectionState};
 pub use notifier::{SshTreeChangedEvent, SshTreeChangedNotifier};
 pub use panel::SshManagerPanel;
 // Re-exports for downstream UI consumers (Commit 2b).

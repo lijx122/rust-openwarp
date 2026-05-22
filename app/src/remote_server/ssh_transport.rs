@@ -17,7 +17,7 @@ use remote_server::client::RemoteServerClient;
 use remote_server::setup::{
     parse_uname_output, remote_server_daemon_dir, PreinstallCheckResult, RemotePlatform,
 };
-use remote_server::ssh::ssh_args;
+use remote_server::ssh::{ssh_args_with_options, SshKeepaliveOptions};
 use remote_server::transport::{Connection, RemoteTransport};
 
 /// SSH transport: connects via a ControlMaster socket.
@@ -30,6 +30,7 @@ use remote_server::transport::{Connection, RemoteTransport};
 pub struct SshTransport {
     socket_path: PathBuf,
     auth_context: Arc<RemoteServerAuthContext>,
+    keepalive_options: SshKeepaliveOptions,
 }
 
 impl fmt::Debug for SshTransport {
@@ -41,10 +42,15 @@ impl fmt::Debug for SshTransport {
 }
 
 impl SshTransport {
-    pub fn new(socket_path: PathBuf, auth_context: Arc<RemoteServerAuthContext>) -> Self {
+    pub fn new(
+        socket_path: PathBuf,
+        auth_context: Arc<RemoteServerAuthContext>,
+        keepalive_options: SshKeepaliveOptions,
+    ) -> Self {
         Self {
             socket_path,
             auth_context,
+            keepalive_options,
         }
     }
 
@@ -97,11 +103,15 @@ impl From<anyhow::Error> for InstallError {
     }
 }
 
-async fn detect_remote_platform(socket_path: &Path) -> Result<RemotePlatform> {
-    let output = remote_server::ssh::run_ssh_command(
+async fn detect_remote_platform(
+    socket_path: &Path,
+    keepalive_options: &SshKeepaliveOptions,
+) -> Result<RemotePlatform> {
+    let output = remote_server::ssh::run_ssh_command_with_options(
         socket_path,
         "uname -sm",
         remote_server::setup::CHECK_TIMEOUT,
+        keepalive_options,
     )
     .await?;
 
@@ -115,11 +125,15 @@ async fn detect_remote_platform(socket_path: &Path) -> Result<RemotePlatform> {
     Err(anyhow!("uname -sm exited with code {code}: {stderr}"))
 }
 
-async fn verify_installed_binary(socket_path: &Path) -> Result<()> {
-    let output = remote_server::ssh::run_ssh_command(
+async fn verify_installed_binary(
+    socket_path: &Path,
+    keepalive_options: &SshKeepaliveOptions,
+) -> Result<()> {
+    let output = remote_server::ssh::run_ssh_command_with_options(
         socket_path,
         &remote_server::setup::binary_check_command(),
         remote_server::setup::CHECK_TIMEOUT,
+        keepalive_options,
     )
     .await?;
 
@@ -138,9 +152,17 @@ async fn run_install_script(
     socket_path: &Path,
     staging_tarball_path: Option<&str>,
     timeout: std::time::Duration,
+    keepalive_options: &SshKeepaliveOptions,
 ) -> core::result::Result<(), InstallError> {
     let script = remote_server::setup::install_script(staging_tarball_path);
-    match remote_server::ssh::run_ssh_script(socket_path, &script, timeout).await {
+    match remote_server::ssh::run_ssh_script_with_options(
+        socket_path,
+        &script,
+        timeout,
+        keepalive_options,
+    )
+    .await
+    {
         Ok(output) if output.status.success() => Ok(()),
         Ok(output) => {
             let exit_code = output.status.code().unwrap_or(-1);
@@ -189,15 +211,19 @@ async fn download_remote_server_tarball(download_url: &str, tarball_path: &Path)
     ))
 }
 
-async fn scp_install_fallback(socket_path: &Path) -> Result<()> {
-    let platform = detect_remote_platform(socket_path).await?;
+async fn scp_install_fallback(
+    socket_path: &Path,
+    keepalive_options: &SshKeepaliveOptions,
+) -> Result<()> {
+    let platform = detect_remote_platform(socket_path, keepalive_options).await?;
     let download_url = remote_server::setup::download_tarball_url(&platform);
     let remote_server_dir = remote_server::setup::remote_server_dir();
     let mkdir_cmd = format!("mkdir -p {remote_server_dir}");
-    let mkdir_output = remote_server::ssh::run_ssh_command(
+    let mkdir_output = remote_server::ssh::run_ssh_command_with_options(
         socket_path,
         &mkdir_cmd,
         remote_server::setup::CHECK_TIMEOUT,
+        keepalive_options,
     )
     .await?;
 
@@ -214,11 +240,12 @@ async fn scp_install_fallback(socket_path: &Path) -> Result<()> {
     download_remote_server_tarball(&download_url, &tarball_path).await?;
 
     let remote_tarball_path = format!("{remote_server_dir}/openwarp-upload.tar.gz");
-    remote_server::ssh::scp_upload(
+    remote_server::ssh::scp_upload_with_options(
         socket_path,
         &tarball_path,
         &remote_tarball_path,
         remote_server::setup::SCP_INSTALL_TIMEOUT,
+        keepalive_options,
     )
     .await?;
 
@@ -226,20 +253,26 @@ async fn scp_install_fallback(socket_path: &Path) -> Result<()> {
         socket_path,
         Some(&remote_tarball_path),
         remote_server::setup::SCP_INSTALL_TIMEOUT,
+        keepalive_options,
     )
     .await
     .map_err(|error| anyhow!("staged install failed: {error}"))?;
 
-    verify_installed_binary(socket_path).await
+    verify_installed_binary(socket_path, keepalive_options).await
 }
 
 impl RemoteTransport for SshTransport {
+    fn control_path(&self) -> Option<PathBuf> {
+        Some(self.socket_path.clone())
+    }
+
     fn detect_platform(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<RemotePlatform, String>> + Send>> {
         let socket_path = self.socket_path.clone();
+        let keepalive_options = self.keepalive_options.clone();
         Box::pin(async move {
-            detect_remote_platform(&socket_path)
+            detect_remote_platform(&socket_path, &keepalive_options)
                 .await
                 .map_err(|e| format!("{e:#}"))
         })
@@ -249,11 +282,13 @@ impl RemoteTransport for SshTransport {
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<PreinstallCheckResult, String>> + Send>> {
         let socket_path = self.socket_path.clone();
+        let keepalive_options = self.keepalive_options.clone();
         Box::pin(async move {
-            match remote_server::ssh::run_ssh_script(
+            match remote_server::ssh::run_ssh_script_with_options(
                 &socket_path,
                 remote_server::setup::PREINSTALL_CHECK_SCRIPT,
                 remote_server::setup::CHECK_TIMEOUT,
+                &keepalive_options,
             )
             .await
             {
@@ -275,13 +310,15 @@ impl RemoteTransport for SshTransport {
 
     fn check_binary(&self) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send>> {
         let socket_path = self.socket_path.clone();
+        let keepalive_options = self.keepalive_options.clone();
         Box::pin(async move {
             let bin_path = remote_server::setup::remote_server_binary();
             log::info!("Checking for remote server binary at {bin_path}");
-            match remote_server::ssh::run_ssh_command(
+            match remote_server::ssh::run_ssh_command_with_options(
                 &socket_path,
                 &remote_server::setup::binary_check_command(),
                 remote_server::setup::CHECK_TIMEOUT,
+                &keepalive_options,
             )
             .await
             {
@@ -303,6 +340,7 @@ impl RemoteTransport for SshTransport {
 
     fn check_has_old_binary(&self) -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + Send>> {
         let socket_path = self.socket_path.clone();
+        let keepalive_options = self.keepalive_options.clone();
         Box::pin(async move {
             // Treat the existence of the remote-server install directory
             // itself as evidence of a prior install. If `~/.warp-XX/remote-server`
@@ -310,10 +348,11 @@ impl RemoteTransport for SshTransport {
             // with the client's expected binary path should be auto-updated
             // rather than surfaced as a first-time install prompt.
             let cmd = format!("test -d {}", remote_server::setup::remote_server_dir());
-            let output = remote_server::ssh::run_ssh_command(
+            let output = remote_server::ssh::run_ssh_command_with_options(
                 &socket_path,
                 &cmd,
                 remote_server::setup::CHECK_TIMEOUT,
+                &keepalive_options,
             )
             .await?;
             // `test -d` exits 0 when present, 1 when missing.
@@ -336,21 +375,27 @@ impl RemoteTransport for SshTransport {
 
     fn install_binary(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
         let socket_path = self.socket_path.clone();
+        let keepalive_options = self.keepalive_options.clone();
         Box::pin(async move {
             log::info!(
                 "Installing remote server binary to {}",
                 remote_server::setup::remote_server_binary()
             );
-            match run_install_script(&socket_path, None, remote_server::setup::INSTALL_TIMEOUT)
-                .await
+            match run_install_script(
+                &socket_path,
+                None,
+                remote_server::setup::INSTALL_TIMEOUT,
+                &keepalive_options,
+            )
+            .await
             {
-                Ok(()) => verify_installed_binary(&socket_path)
+                Ok(()) => verify_installed_binary(&socket_path, &keepalive_options)
                     .await
                     .map_err(|error| format!("{error:#}")),
                 Err(error) if should_skip_scp_fallback(&error) => Err(error.to_string()),
                 Err(error) => {
                     log::warn!("remote-server install failed, trying SCP fallback: {error}");
-                    match scp_install_fallback(&socket_path).await {
+                    match scp_install_fallback(&socket_path, &keepalive_options).await {
                         Ok(()) => Ok(()),
                         Err(fallback_error) => {
                             Err(format!("{error}; SCP fallback failed: {fallback_error:#}"))
@@ -367,8 +412,9 @@ impl RemoteTransport for SshTransport {
     ) -> Pin<Box<dyn Future<Output = Result<Connection>> + Send>> {
         let socket_path = self.socket_path.clone();
         let remote_proxy_command = self.remote_proxy_command();
+        let keepalive_options = self.keepalive_options.clone();
         Box::pin(async move {
-            let mut args = ssh_args(&socket_path);
+            let mut args = ssh_args_with_options(&socket_path, &keepalive_options);
             args.push(remote_proxy_command);
 
             // `kill_on_drop(true)` pairs with ownership of the `Child` being
@@ -412,13 +458,15 @@ impl RemoteTransport for SshTransport {
         &self,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
         let socket_path = self.socket_path.clone();
+        let keepalive_options = self.keepalive_options.clone();
         Box::pin(async move {
             let cmd = format!("rm -f {}", remote_server::setup::remote_server_binary());
             log::info!("Removing stale remote server binary: {cmd}");
-            let output = remote_server::ssh::run_ssh_command(
+            let output = remote_server::ssh::run_ssh_command_with_options(
                 &socket_path,
                 &cmd,
                 remote_server::setup::CHECK_TIMEOUT,
+                &keepalive_options,
             )
             .await?;
             if output.status.success() {
@@ -447,6 +495,7 @@ mod tests {
         let transport = SshTransport::new(
             PathBuf::from("/tmp/control-master.sock"),
             static_auth_context(),
+            SshKeepaliveOptions::default(),
         );
 
         let command = transport.remote_proxy_command();

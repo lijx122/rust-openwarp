@@ -1277,6 +1277,24 @@ fn initialize_app(
     ctx.add_singleton_model(|_ctx| SyncedInputState::new());
 
     ctx.add_singleton_model(remote_server::manager::RemoteServerManager::new);
+    {
+        let config = crate::settings::SshSettings::as_ref(ctx).remote_server_manager_config();
+        remote_server::manager::RemoteServerManager::handle(ctx)
+            .update(ctx, move |manager, _ctx| {
+                manager.update_config(config.clone())
+            });
+        ctx.subscribe_to_model(
+            &crate::settings::SshSettings::handle(ctx),
+            |_, _, ctx| {
+                let config =
+                    crate::settings::SshSettings::as_ref(ctx).remote_server_manager_config();
+                remote_server::manager::RemoteServerManager::handle(ctx)
+                    .update(ctx, move |manager, _ctx| {
+                        manager.update_config(config.clone())
+                    });
+            },
+        );
+    }
     // OpenWarp Wave 6-1:`remote_server::wire_auth_token_rotation(ctx)` 调用随
     // server API token rotation 事件 + `wire_auth_token_rotation` 函数本体一同物理删。
 
@@ -1409,6 +1427,14 @@ fn initialize_app(
                 let mgr = RemoteServerManager::handle(ctx);
                 ctx.subscribe_to_model(&mgr, |me, event, ctx| match event {
                     RemoteServerManagerEvent::RepoMetadataSnapshot { host_id, update } => {
+                        tracing::info!(
+                            target: "repo_metadata_snapshot",
+                            host_id = ?host_id,
+                            repo_path = ?update.repo_path,
+                            root_count = update.update_entries.len(),
+                            "RepoMetadataSnapshot received, root_count={:?}",
+                            update.update_entries.len()
+                        );
                         me.insert_remote_snapshot(host_id.clone(), update, ctx);
                     }
                     RemoteServerManagerEvent::RepoMetadataUpdated { host_id, update }
@@ -1500,6 +1526,7 @@ fn initialize_app(
     ctx.add_singleton_model(|_| SystemStats::new());
     ctx.add_singleton_model(|_| KeybindingChangedNotifier::new());
     ctx.add_singleton_model(|_| crate::ssh_manager::SshTreeChangedNotifier::new());
+    ctx.add_singleton_model(|ctx| crate::ssh_manager::SshConnectionModel::new(ctx));
     ctx.add_singleton_model(|_| search::command_palette::SelectedItems::new());
     ctx.add_singleton_model(search::files::model::FileSearchModel::new);
     ctx.add_singleton_model(|_| VimRegisters::new());

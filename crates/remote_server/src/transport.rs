@@ -61,6 +61,9 @@ pub struct Connection {
 /// Object-safe: returns boxed futures so implementations can be stored
 /// as `Arc<dyn RemoteTransport>` for reconnection.
 pub trait RemoteTransport: Send + Sync + std::fmt::Debug {
+    #[cfg(not(target_family = "wasm"))]
+    fn control_path(&self) -> Option<PathBuf>;
+
     /// Detects the remote host's OS and architecture by running `uname -sm`.
     ///
     /// Returns the parsed [`RemotePlatform`] on success, or an error string

@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use warp_util::path::LineAndColumnArg;
 use warp_util::standardized_path::StandardizedPath;
 
@@ -25,7 +26,7 @@ use warpui::elements::{
 };
 use warpui::fonts::Style;
 use warpui::keymap::FixedBinding;
-use warpui::platform::Cursor;
+use warpui::platform::{Cursor, FilePickerConfiguration};
 use warpui::text_layout::TextAlignment;
 use warpui::{clipboard::ClipboardContent, id, ViewContext, WeakViewHandle};
 use warpui::{
@@ -114,6 +115,12 @@ pub enum FileTreeAction {
     OpenInFinder {
         id: FileTreeIdentifier,
     },
+    Download {
+        id: FileTreeIdentifier,
+    },
+    Upload {
+        id: FileTreeIdentifier,
+    },
     Rename {
         id: FileTreeIdentifier,
     },
@@ -177,6 +184,7 @@ pub fn init(app: &mut AppContext) {
 const ITEM_FONT_SIZE: f32 = 14.;
 const FOLDER_INDENT: f32 = 16.; // Indentation per folder level
 const ITEM_PADDING: f32 = 4.;
+const REMOTE_TRANSFER_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Represents a single item in the flattened file tree list.
 /// This is used to store the necessary information for rendering each item
@@ -215,6 +223,17 @@ struct ContextMenuState {
 struct PendingEdit {
     kind: PendingEditKind,
     id: FileTreeIdentifier,
+}
+
+#[derive(Clone)]
+struct RemoteActionTarget {
+    host_id: HostId,
+    control_path: PathBuf,
+    keepalive_options: remote_server::ssh::SshKeepaliveOptions,
+    repo_root: String,
+    refresh_dir: String,
+    target_path: String,
+    target_is_directory: bool,
 }
 
 /// Per-root directory state for the file tree.
@@ -1962,7 +1981,7 @@ impl FileTreeView {
 
             if is_remote_file && mouse_state.is_hovered() {
                 let tooltip = ui_builder
-                    .tool_tip(crate::t!("code-open-file-unavailable-remote-tooltip"))
+                    .tool_tip(crate::t!("menu-filetree-download"))
                     .build()
                     .finish();
                 let offset = OffsetPositioning::offset_from_parent(
@@ -2000,12 +2019,7 @@ impl FileTreeView {
                 });
             },
         )
-        // Remote files can't be opened in the editor, so use the default cursor.
-        .with_cursor(if is_remote_file {
-            Cursor::Arrow
-        } else {
-            Cursor::PointingHand
-        })
+        .with_cursor(Cursor::PointingHand)
         .finish();
 
         let draggable = Draggable::new(draggable_state, hoverable)
@@ -2166,6 +2180,93 @@ impl FileTreeView {
         }
     }
 
+    #[cfg(feature = "local_fs")]
+    fn remote_action_target(
+        &self,
+        id: &FileTreeIdentifier,
+        ctx: &AppContext,
+    ) -> Option<RemoteActionTarget> {
+        use crate::remote_server::manager::RemoteServerManager;
+
+        let root_dir = self.root_directories.get(&id.root)?;
+        let item = root_dir.items.get(id.index)?;
+        let host_id = root_dir.remote_host_id.clone()?;
+        let control_path = RemoteServerManager::as_ref(ctx).control_path_for_host(&host_id)?;
+        let keepalive_options = crate::settings::SshSettings::as_ref(ctx).keepalive_options();
+        let repo_root = root_dir.entry.root_directory().to_string();
+        let target_path = item.path().to_string();
+        let target_is_directory = matches!(item, FileTreeItem::DirectoryHeader { .. });
+        let refresh_dir = if target_is_directory {
+            target_path.clone()
+        } else {
+            Path::new(&target_path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| repo_root.clone())
+        };
+
+        Some(RemoteActionTarget {
+            host_id,
+            control_path,
+            keepalive_options,
+            repo_root,
+            refresh_dir,
+            target_path,
+            target_is_directory,
+        })
+    }
+
+    #[cfg(feature = "local_fs")]
+    fn refresh_remote_directory(
+        &mut self,
+        host_id: HostId,
+        repo_root: String,
+        dir_path: String,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use crate::remote_server::manager::RemoteServerManager;
+
+        let session_id = RemoteServerManager::as_ref(ctx)
+            .sessions_for_host(&host_id)
+            .and_then(|sessions| sessions.iter().next().copied());
+        let Some(session_id) = session_id else {
+            return;
+        };
+
+        RemoteServerManager::handle(ctx).update(ctx, move |manager, ctx| {
+            manager.load_remote_repo_metadata_directory(session_id, repo_root, dir_path, ctx);
+        });
+    }
+
+    fn remote_batch_quote(path: &str) -> String {
+        let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\"")
+    }
+
+    #[cfg(feature = "local_fs")]
+    fn show_remote_error_toast(ctx: &mut ViewContext<Self>, message: impl Into<String>) {
+        let window_id = ctx.window_id();
+        let message = message.into();
+        ToastStack::handle(ctx).update(ctx, move |toast_stack, ctx| {
+            let toast =
+                DismissibleToast::error(message).with_object_id("file_tree_remote_error".into());
+            toast_stack.add_ephemeral_toast(toast, window_id, ctx);
+        });
+    }
+
+    #[cfg(feature = "local_fs")]
+    fn remote_download_destination(remote_path: &str) -> PathBuf {
+        let remote_name = Path::new(remote_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("remote-file");
+        let temp_dir = std::env::temp_dir().join("openwarp-remote-downloads");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let unique_name = format!("{}-{remote_name}", uuid::Uuid::new_v4());
+        temp_dir.join(unique_name)
+    }
+
     #[cfg(not(feature = "local_fs"))]
     fn open_file(
         &self,
@@ -2210,6 +2311,201 @@ impl FileTreeView {
         });
     }
 
+    #[cfg(feature = "local_fs")]
+    fn download_remote_item(
+        &mut self,
+        id: &FileTreeIdentifier,
+        open_after_download: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(target) = self.remote_action_target(id, ctx) else {
+            return;
+        };
+        if target.target_is_directory {
+            Self::show_remote_error_toast(ctx, "暂不支持直接下载远程目录。");
+            return;
+        }
+
+        let local_path = Self::remote_download_destination(&target.target_path);
+        let remote_path = target.target_path.clone();
+        let control_path = target.control_path.clone();
+        let keepalive_options = target.keepalive_options.clone();
+
+        let _ = ctx.spawn(
+            async move {
+                remote_server::ssh::scp_download(
+                    &control_path,
+                    &remote_path,
+                    &local_path,
+                    REMOTE_TRANSFER_TIMEOUT,
+                    &keepalive_options,
+                )
+                .await
+                .map(|_| local_path)
+            },
+            move |_me, result, ctx| match result {
+                Ok(path) => {
+                    if open_after_download {
+                        ctx.emit(FileTreeEvent::OpenFile {
+                            path,
+                            target: FileTarget::SystemDefault,
+                            line_col: None,
+                        });
+                    }
+                }
+                Err(error) => {
+                    Self::show_remote_error_toast(ctx, format!("远程下载失败: {error:#}"));
+                }
+            },
+        );
+    }
+
+    #[cfg(feature = "local_fs")]
+    fn upload_remote_item(&mut self, id: &FileTreeIdentifier, ctx: &mut ViewContext<Self>) {
+        let Some(target) = self.remote_action_target(id, ctx) else {
+            return;
+        };
+        let destination_dir = if target.target_is_directory {
+            target.target_path.clone()
+        } else {
+            target.refresh_dir.clone()
+        };
+        let view_handle = ctx.handle().clone();
+        ctx.open_file_picker(
+            move |result, ctx| {
+                let Ok(paths) = result else {
+                    return;
+                };
+                if paths.is_empty() {
+                    return;
+                }
+
+                let Some(view) = view_handle.upgrade(ctx) else {
+                    return;
+                };
+                let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+                view.update(ctx, move |me, ctx| {
+                    let control_path = target.control_path.clone();
+                    let keepalive_options = target.keepalive_options.clone();
+                    let repo_root = target.repo_root.clone();
+                    let refresh_dir = destination_dir.clone();
+                    let host_id = target.host_id.clone();
+                    let batch = paths
+                        .iter()
+                        .map(|path| {
+                            let local = Self::remote_batch_quote(&path.to_string_lossy());
+                            let remote = Self::remote_batch_quote(&refresh_dir);
+                            if path.is_dir() {
+                                format!("put -r {local} {remote}")
+                            } else {
+                                format!("put {local} {remote}")
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    let _ = ctx.spawn(
+                        async move {
+                            remote_server::ssh::run_sftp_batch(
+                                &control_path,
+                                &format!("{batch}\n"),
+                                REMOTE_TRANSFER_TIMEOUT,
+                                &keepalive_options,
+                            )
+                            .await
+                        },
+                        move |me, result, ctx| match result {
+                            Ok(output) if output.status.success() => {
+                                me.refresh_remote_directory(
+                                    host_id.clone(),
+                                    repo_root.clone(),
+                                    refresh_dir.clone(),
+                                    ctx,
+                                );
+                            }
+                            Ok(output) => {
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                Self::show_remote_error_toast(
+                                    ctx,
+                                    format!("远程上传失败: {stderr}"),
+                                );
+                            }
+                            Err(error) => {
+                                Self::show_remote_error_toast(
+                                    ctx,
+                                    format!("远程上传失败: {error:#}"),
+                                );
+                            }
+                        },
+                    );
+                });
+            },
+            FilePickerConfiguration::new()
+                .allow_folder()
+                .allow_multi_select(),
+        );
+    }
+
+    #[cfg(feature = "local_fs")]
+    fn rename_remote_item(&mut self, id: &FileTreeIdentifier, ctx: &mut ViewContext<Self>) {
+        let exists = self
+            .root_directories
+            .get(&id.root)
+            .and_then(|root_dir| root_dir.items.get(id.index))
+            .is_some();
+        if !exists {
+            return;
+        }
+        self.start_rename(id, ctx);
+    }
+
+    #[cfg(feature = "local_fs")]
+    fn delete_remote_item(&mut self, id: &FileTreeIdentifier, ctx: &mut ViewContext<Self>) {
+        let Some(target) = self.remote_action_target(id, ctx) else {
+            return;
+        };
+
+        let command = if target.target_is_directory {
+            format!("rm -rf -- {}", shell_words::quote(&target.target_path))
+        } else {
+            format!("rm -f -- {}", shell_words::quote(&target.target_path))
+        };
+        let control_path = target.control_path.clone();
+        let keepalive_options = target.keepalive_options.clone();
+        let host_id = target.host_id.clone();
+        let repo_root = target.repo_root.clone();
+        let refresh_dir = target.refresh_dir.clone();
+
+        let _ = ctx.spawn(
+            async move {
+                remote_server::ssh::run_ssh_command_with_options(
+                    &control_path,
+                    &command,
+                    REMOTE_TRANSFER_TIMEOUT,
+                    &keepalive_options,
+                )
+                .await
+            },
+            move |me, result, ctx| match result {
+                Ok(output) if output.status.success() => {
+                    me.refresh_remote_directory(
+                        host_id.clone(),
+                        repo_root.clone(),
+                        refresh_dir.clone(),
+                        ctx,
+                    );
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    Self::show_remote_error_toast(ctx, format!("远程删除失败: {stderr}"));
+                }
+                Err(error) => {
+                    Self::show_remote_error_toast(ctx, format!("远程删除失败: {error:#}"));
+                }
+            },
+        );
+    }
+
     fn select_and_execute_item_at_id(
         &mut self,
         id: &FileTreeIdentifier,
@@ -2226,8 +2522,9 @@ impl FileTreeView {
 
         match item {
             FileTreeItem::File { metadata, .. } => {
-                // Remote file trees don't support opening files in the editor.
-                if !is_remote {
+                if is_remote {
+                    self.download_remote_item(id, true, ctx);
+                } else {
                     let path = metadata.path.to_local_path_lossy();
                     self.open_file(&path, None, ctx);
                 }
@@ -2269,10 +2566,36 @@ impl FileTreeView {
         let mut items = vec![];
 
         if is_remote {
-            // Remote file trees only support a limited set of actions:
-            // copying paths and attaching as context. File opening,
-            // creation, rename, delete, cd, and reveal are unavailable
-            // because there is no local filesystem or editor support.
+            match item {
+                FileTreeItem::File { .. } => {
+                    items.push(
+                        MenuItemFields::new(crate::t!("menu-filetree-download"))
+                            .with_on_select_action(FileTreeAction::Download { id: id.clone() })
+                            .into_item(),
+                    );
+                }
+                FileTreeItem::DirectoryHeader { .. } => {
+                    items.push(
+                        MenuItemFields::new(crate::t!("menu-filetree-upload"))
+                            .with_on_select_action(FileTreeAction::Upload { id: id.clone() })
+                            .into_item(),
+                    );
+                }
+            }
+
+            let is_repo_root_dir = id.index == 0;
+            if !is_repo_root_dir {
+                items.push(
+                    MenuItemFields::new(crate::t!("menu-filetree-rename"))
+                        .with_on_select_action(FileTreeAction::Rename { id: id.clone() })
+                        .into_item(),
+                );
+                items.push(
+                    MenuItemFields::new(crate::t!("menu-filetree-delete"))
+                        .with_on_select_action(FileTreeAction::Delete { id: id.clone() })
+                        .into_item(),
+                );
+            }
         } else {
             match item {
                 FileTreeItem::File { .. } => {
@@ -2846,6 +3169,7 @@ impl FileTreeView {
     }
 }
 
+#[derive(Clone, Debug)]
 pub enum FileTreeEvent {
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
     AttachAsContext { path: PathBuf },
@@ -3078,14 +3402,30 @@ impl TypedActionView for FileTreeView {
                 }
                 self.context_menu_state.take();
             }
+            FileTreeAction::Download { id } => {
+                if self.is_remote_item(id) {
+                    self.download_remote_item(id, false, ctx);
+                }
+                self.context_menu_state.take();
+            }
+            FileTreeAction::Upload { id } => {
+                if self.is_remote_item(id) {
+                    self.upload_remote_item(id, ctx);
+                }
+                self.context_menu_state.take();
+            }
             FileTreeAction::Rename { id } => {
-                if !self.is_remote_item(id) {
+                if self.is_remote_item(id) {
+                    self.rename_remote_item(id, ctx);
+                } else {
                     self.rename_item(id, ctx);
                 }
                 self.context_menu_state.take();
             }
             FileTreeAction::Delete { id } => {
-                if !self.is_remote_item(id) {
+                if self.is_remote_item(id) {
+                    self.delete_remote_item(id, ctx);
+                } else {
                     self.delete_item(id, ctx);
                 }
                 self.context_menu_state.take();

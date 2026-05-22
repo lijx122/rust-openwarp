@@ -663,6 +663,9 @@ pub enum FeatureFlag {
     /// for command execution.
     SshRemoteServer,
 
+    /// Enables the keepalive and reconnect improvements for SSH/SFTP sessions.
+    SshKeepaliveV2,
+
     /// Enables summary mode in vertical tabs, showing condensed tab summaries
     /// instead of individual pane rows.
     VerticalTabsSummaryMode,
@@ -763,6 +766,7 @@ pub const RELEASE_FLAGS: &[FeatureFlag] = &[
     // Remote server binary is not yet supported on Windows.
     #[cfg(not(windows))]
     FeatureFlag::SshRemoteServer,
+    FeatureFlag::SshKeepaliveV2,
 ];
 
 /// Flags that we want to allow to switch at runtime (assuming RuntimeFeatureFlags is set)

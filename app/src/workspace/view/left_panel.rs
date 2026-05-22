@@ -240,26 +240,14 @@ impl LeftPanelView {
         };
         let warp_drive_view = ctx.add_typed_action_view(DrivePanel::new);
         let conversation_list_view = ctx.add_typed_action_view(ConversationListView::new);
+        let active_view = views.first().copied().unwrap_or(ToolPanelView::WarpDrive);
         let ssh_manager_view = ctx.add_typed_action_view(SshManagerPanel::new);
         let skill_manager_view = ctx.add_typed_action_view(SkillManagerPanel::new);
-        ctx.subscribe_to_view(&ssh_manager_view, |_me, _, event, ctx| {
-            use crate::ssh_manager::SshManagerPanelEvent;
-            match event {
-                SshManagerPanelEvent::OpenServerEditor { node_id } => {
-                    ctx.emit(LeftPanelEvent::OpenSshServerEditor {
-                        node_id: node_id.clone(),
-                    });
-                }
-                SshManagerPanelEvent::OpenSshTerminal { node_id, server } => {
-                    ctx.emit(LeftPanelEvent::OpenSshTerminal {
-                        node_id: node_id.clone(),
-                        server: server.clone(),
-                    });
-                }
-                SshManagerPanelEvent::PersistenceError(msg) => {
-                    log::error!("ssh_manager persistence error: {msg}");
-                }
-            }
+        ctx.subscribe_to_view(&ssh_manager_view, |me, _, event, ctx| {
+            me.handle_ssh_manager_event(event, ctx);
+        });
+        ssh_manager_view.update(ctx, |view, ctx| {
+            view.set_is_active(active_view == ToolPanelView::SshManager, ctx);
         });
         ctx.subscribe_to_view(&skill_manager_view, |_me, _, event, ctx| match event {
             SkillManagerPanelEvent::OpenSkillFile { path } => {
@@ -295,7 +283,6 @@ impl LeftPanelView {
             }
         });
 
-        let active_view = views.first().copied().unwrap_or(ToolPanelView::WarpDrive);
         let toolbelt_buttons = views
             .iter()
             .map(|view| Self::create_toolbelt_button_config(view, ctx))
@@ -832,7 +819,6 @@ impl LeftPanelView {
         }
     }
 
-    #[cfg(feature = "local_fs")]
     fn handle_file_tree_event(&mut self, event: &FileTreeEvent, ctx: &mut ViewContext<Self>) {
         match event {
             FileTreeEvent::FileRenamed { old_path, new_path } => {
@@ -871,6 +857,40 @@ impl LeftPanelView {
                 ctx.emit(LeftPanelEvent::FileTree(
                     pane_group::Event::OpenDirectoryInNewTab { path: path.clone() },
                 ));
+            }
+        }
+    }
+
+    #[cfg(not(feature = "local_fs"))]
+    fn handle_file_tree_event(
+        &mut self,
+        _event: &crate::code::file_tree::FileTreeEvent,
+        _ctx: &mut ViewContext<Self>,
+    ) {
+    }
+
+    fn handle_ssh_manager_event(
+        &mut self,
+        event: &crate::ssh_manager::SshManagerPanelEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            crate::ssh_manager::SshManagerPanelEvent::FileTree(file_tree_event) => {
+                self.handle_file_tree_event(file_tree_event, ctx);
+            }
+            crate::ssh_manager::SshManagerPanelEvent::OpenServerEditor { node_id } => {
+                ctx.emit(LeftPanelEvent::OpenSshServerEditor {
+                    node_id: node_id.clone(),
+                });
+            }
+            crate::ssh_manager::SshManagerPanelEvent::OpenSshTerminal { node_id, server } => {
+                ctx.emit(LeftPanelEvent::OpenSshTerminal {
+                    node_id: node_id.clone(),
+                    server: server.clone(),
+                });
+            }
+            crate::ssh_manager::SshManagerPanelEvent::PersistenceError(msg) => {
+                log::error!("ssh_manager persistence error: {msg}");
             }
         }
     }
@@ -1119,6 +1139,8 @@ impl LeftPanelView {
 
         let is_visible = active_pane_group.as_ref(ctx).left_panel_open
             && self.active_view.get() == ToolPanelView::ProjectExplorer;
+        let is_ssh_visible = active_pane_group.as_ref(ctx).left_panel_open
+            && self.active_view.get() == ToolPanelView::SshManager;
 
         if let Some(file_tree_view) = self
             .working_directories_model
@@ -1129,6 +1151,11 @@ impl LeftPanelView {
                 view.set_is_active(is_visible, ctx);
             });
         }
+
+        self.ssh_manager_view.update(ctx, |view, ctx| {
+            view.set_is_active(is_ssh_visible, ctx);
+            view.set_file_tree_is_active(is_ssh_visible, ctx);
+        });
     }
 
     /// When the conversation list view's visibility changes,

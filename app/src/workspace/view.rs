@@ -5324,12 +5324,18 @@ impl Workspace {
             log::warn!("open_ssh_terminal: no terminal in newly added tab");
             return;
         };
+        crate::ssh_manager::SshConnectionModel::handle(ctx).update(ctx, |model, ctx| {
+            model.start_connect(node_id.clone(), terminal_view.id(), ctx);
+        });
 
         if AISettings::as_ref(ctx).default_session_mode(ctx) == DefaultSessionMode::Agent {
             terminal_view.update(ctx, |view, _| {
                 view.set_enter_agent_view_after_ssh_bootstrap();
             });
         }
+        terminal_view.update(ctx, |view, _| {
+            view.set_auto_warpify_ssh_after_login();
+        });
 
         // 1. 同步读 keychain(主线程 OK)。auth_type 决定查 password 还是 passphrase。
         let secret_kind = match server.auth_type {

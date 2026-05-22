@@ -28,12 +28,33 @@ use warp_core::SessionId;
 use warpui::r#async::FutureExt as _;
 use warpui::{Entity, ModelContext, ModelSpawner, SingletonEntity};
 
-/// Maximum number of reconnection attempts after a spontaneous disconnect.
+#[derive(Clone, Debug)]
+pub struct RemoteServerManagerConfig {
+    pub auto_reconnect_enabled: bool,
+    pub max_attempts: u32,
+    pub initial_backoff: Duration,
+    pub max_backoff: Duration,
+}
+
+impl Default for RemoteServerManagerConfig {
+    fn default() -> Self {
+        Self {
+            auto_reconnect_enabled: true,
+            max_attempts: 10,
+            initial_backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(30),
+        }
+    }
+}
+
 #[cfg(not(target_family = "wasm"))]
-const MAX_RECONNECT_ATTEMPTS: u32 = 2;
-/// Delay between reconnection attempts.
-#[cfg(not(target_family = "wasm"))]
-const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+fn reconnect_delay(initial_backoff: Duration, max_backoff: Duration, attempt: u32) -> Duration {
+    let multiplier = 1u32
+        .checked_shl(attempt.saturating_sub(1))
+        .unwrap_or(u32::MAX);
+    let delay = initial_backoff.saturating_mul(multiplier);
+    delay.min(max_backoff)
+}
 
 /// Parameters that travel together through the reconnection flow.
 #[cfg(not(target_family = "wasm"))]
@@ -263,6 +284,12 @@ pub enum RemoteServerManagerEvent {
         /// the exit status could not be determined.
         exit_status: Option<RemoteServerExitStatus>,
     },
+    /// A reconnect attempt has started after a spontaneous disconnect.
+    SessionReconnectStarted {
+        session_id: SessionId,
+        host_id: HostId,
+        attempt: u32,
+    },
     /// A reconnection attempt succeeded. Downstream owners (e.g.
     /// `RemoteServerCommandExecutor`) should swap their client reference
     /// to the new one carried in `client`.
@@ -373,6 +400,7 @@ impl RemoteServerManagerEvent {
             | RemoteServerManagerEvent::SessionConnected { session_id, .. }
             | RemoteServerManagerEvent::SessionConnectionFailed { session_id, .. }
             | RemoteServerManagerEvent::SessionDisconnected { session_id, .. }
+            | RemoteServerManagerEvent::SessionReconnectStarted { session_id, .. }
             | RemoteServerManagerEvent::SessionReconnected { session_id, .. }
             | RemoteServerManagerEvent::SessionDeregistered { session_id }
             | RemoteServerManagerEvent::NavigatedToDirectory { session_id, .. }
@@ -434,6 +462,7 @@ pub struct RemoteServerManager {
     /// Detected remote platform per session, populated during the binary check
     /// phase via `detect_platform()`. Used for telemetry.
     session_platforms: HashMap<SessionId, RemotePlatform>,
+    config: RemoteServerManagerConfig,
 }
 
 impl Entity for RemoteServerManager {
@@ -452,7 +481,12 @@ impl RemoteServerManager {
             session_bootstrap_info: HashMap::new(),
             auth_context: None,
             session_platforms: HashMap::new(),
+            config: RemoteServerManagerConfig::default(),
         }
+    }
+
+    pub fn update_config(&mut self, config: RemoteServerManagerConfig) {
+        self.config = config;
     }
 
     /// Returns a connected client for the given host by picking an arbitrary
@@ -1051,6 +1085,23 @@ impl RemoteServerManager {
         self.host_to_sessions.get(host_id)
     }
 
+    #[cfg(not(target_family = "wasm"))]
+    pub fn control_path_for_host(&self, host_id: &HostId) -> Option<PathBuf> {
+        let sessions = self.host_to_sessions.get(host_id)?;
+        sessions
+            .iter()
+            .find_map(|session_id| match self.sessions.get(session_id) {
+                Some(RemoteSessionState::Connected { control_path, .. })
+                | Some(RemoteSessionState::Initializing { control_path, .. })
+                | Some(RemoteSessionState::Reconnecting { control_path, .. }) => {
+                    control_path.clone()
+                }
+                Some(RemoteSessionState::Connecting | RemoteSessionState::Disconnected) | None => {
+                    None
+                }
+            })
+    }
+
     /// Sends a `NavigatedToDirectory` request to the remote server for
     /// the given session and emits the response as a manager event.
     ///
@@ -1410,19 +1461,29 @@ impl RemoteServerManager {
             // navigated path is only deduping for the current _remote server session.
             self.last_navigated_path.remove(&session_id);
 
-            self.attempt_reconnect(
-                session_id,
-                ReconnectParams {
-                    attempt: 1,
+            if self.config.auto_reconnect_enabled {
+                self.attempt_reconnect(
+                    session_id,
+                    ReconnectParams {
+                        attempt: 1,
+                        host_id,
+                        exit_status,
+                        transport,
+                        auth_context,
+                        control_path,
+                        identity_key,
+                    },
+                    ctx,
+                );
+            } else {
+                self.sessions
+                    .insert(session_id, RemoteSessionState::Disconnected);
+                ctx.emit(RemoteServerManagerEvent::SessionDisconnected {
+                    session_id,
                     host_id,
                     exit_status,
-                    transport,
-                    auth_context,
-                    control_path,
-                    identity_key,
-                },
-                ctx,
-            );
+                });
+            }
         } else {
             // Non-Connected states (Initializing, Connecting, etc.) —
             // no reconnect, just mark disconnected.
@@ -1451,7 +1512,8 @@ impl RemoteServerManager {
 
         log::info!(
             "Attempting reconnect for session {session_id:?} \
-             (attempt {attempt}/{MAX_RECONNECT_ATTEMPTS})"
+             (attempt {attempt}/{})",
+            self.config.max_attempts
         );
 
         self.sessions.insert(
@@ -1462,15 +1524,25 @@ impl RemoteServerManager {
                 control_path: control_path.clone(),
             },
         );
+        ctx.emit(RemoteServerManagerEvent::SessionReconnectStarted {
+            session_id,
+            host_id: host_id.clone(),
+            attempt,
+        });
 
         let spawner = self.spawner.clone();
         let executor = ctx.background_executor().clone();
         let transport_clone = Arc::clone(&transport);
         let auth_context_for_task = Arc::clone(&auth_context);
+        let delay = reconnect_delay(
+            self.config.initial_backoff,
+            self.config.max_backoff,
+            attempt,
+        );
 
         ctx.background_executor()
             .spawn(async move {
-                async_io::Timer::after(RECONNECT_DELAY).await;
+                async_io::Timer::after(delay).await;
 
                 // Check if the session was deregistered during the delay.
                 // (Checked via spawner since sessions lives on the main thread.)
@@ -1567,7 +1639,7 @@ impl RemoteServerManager {
         params: ReconnectParams,
         ctx: &mut ModelContext<Self>,
     ) {
-        if params.attempt < MAX_RECONNECT_ATTEMPTS {
+        if params.attempt < self.config.max_attempts {
             self.attempt_reconnect(
                 session_id,
                 ReconnectParams {
