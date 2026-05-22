@@ -1285,7 +1285,7 @@ fn initialize_app(
             });
         ctx.subscribe_to_model(
             &crate::settings::SshSettings::handle(ctx),
-            |_, _, _, ctx| {
+            |_, _, ctx| {
                 let config =
                     crate::settings::SshSettings::as_ref(ctx).remote_server_manager_config();
                 remote_server::manager::RemoteServerManager::handle(ctx)

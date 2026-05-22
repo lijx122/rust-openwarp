@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use pathfinder_geometry::vector::Vector2F;
 use repo_metadata::RepoMetadataModel;
-use warp_core::ui::theme::color::internal_colors;
+use warp_core::ui::theme::{color::internal_colors, Fill};
 use warpui::elements::{
     AcceptedByDropTarget, Border, ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius,
     CrossAxisAlignment, Dismiss, Draggable, DraggableState, DropTarget, DropTargetData, Element,
@@ -272,7 +272,7 @@ impl SshManagerPanel {
     fn connected_host_id(&self, ctx: &AppContext) -> Option<&str> {
         let selected_id = self.selected_id.as_deref()?;
         let connection = SshConnectionModel::as_ref(ctx).connection_for_node(selected_id)?;
-        let host_id = connection.host_id.as_deref()?;
+        let host_id = connection.host_id.as_ref()?.as_str();
 
         matches!(
             connection.state,
@@ -816,10 +816,10 @@ impl SshManagerPanel {
         let theme = appearance.theme();
 
         let (label, color) = match connection.state {
-            SshConnectionState::Connected => ("Connected", theme.success()),
-            SshConnectionState::Reconnecting => ("Reconnecting", theme.warning()),
-            SshConnectionState::Failed => ("Failed", theme.error()),
-            SshConnectionState::Connecting => ("Connecting", theme.accent()),
+            SshConnectionState::Connected => ("Connected", Fill::success()),
+            SshConnectionState::Reconnecting => ("Reconnecting", Fill::warn()),
+            SshConnectionState::Failed => ("Failed", Fill::error()),
+            SshConnectionState::Connecting => ("Connecting", theme.accent().into()),
             SshConnectionState::Disconnected => return None,
         };
 

@@ -1,5 +1,6 @@
 use settings::{
-    macros::define_settings_group, RespectUserSyncSetting, SupportedPlatforms, SyncToCloud,
+    macros::define_settings_group, RespectUserSyncSetting, Setting as _, SupportedPlatforms,
+    SyncToCloud,
 };
 use std::time::Duration;
 use warp_core::features::FeatureFlag;
