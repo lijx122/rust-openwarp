@@ -941,7 +941,7 @@ impl LeftPanelView {
         {
             let repo_model = RepoMetadataModel::as_ref(ctx);
             let sftp_model = crate::ssh_manager::SftpBrowserModel::as_ref(ctx);
-            let mut remote_roots = Vec::new();
+            let mut remote_roots: Vec<repo_metadata::RemoteRepositoryIdentifier> = Vec::new();
             for remote_id in repo_model.remote_repository_ids(ctx) {
                 if !repo_model.has_repository(
                     &repo_metadata::RepositoryIdentifier::Remote(remote_id.clone()),
