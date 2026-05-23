@@ -10602,6 +10602,13 @@ impl TerminalView {
                 }
             }
             ModelEvent::ExitShell { session_id } => {
+                if let Some(node_id) = crate::ssh_manager::SshConnectionModel::handle(ctx)
+                    .update(ctx, |model, ctx| model.release_terminal_view(self.id(), ctx))
+                {
+                    crate::ssh_manager::SftpBrowserModel::handle(ctx).update(ctx, |model, ctx| {
+                        model.disconnect_node(&node_id, ctx);
+                    });
+                }
                 // Drop the remote server client for this session before the
                 // user's outer ssh tunnel starts closing. The last
                 // `Arc<RemoteServerClient>` carries an owned `Child` for the

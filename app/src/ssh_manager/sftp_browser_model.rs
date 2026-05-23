@@ -48,8 +48,22 @@ impl SftpBrowserModel {
         self.hosts.contains_key(host_id)
     }
 
+    pub fn managed_host_id_for_node(&self, node_id: &str) -> Option<HostId> {
+        let host_id = Self::host_id_for_node(node_id);
+        self.hosts.contains_key(&host_id).then_some(host_id)
+    }
+
     pub fn server_for_host(&self, host_id: &HostId) -> Option<SshServerInfo> {
         self.hosts.get(host_id).map(|host| host.server.clone())
+    }
+
+    pub fn disconnect_node(&mut self, node_id: &str, ctx: &mut ModelContext<Self>) {
+        let host_id = Self::host_id_for_node(node_id);
+        self.hosts.remove(&host_id);
+        repo_metadata::RepoMetadataModel::handle(ctx).update(ctx, |model, ctx| {
+            model.remove_remote_repositories_for_host(&host_id, ctx);
+        });
+        ctx.notify();
     }
 
     pub fn run_batch_for_host(

@@ -620,21 +620,41 @@ impl FileTreeView {
                 let repo_path = remote_id.path.clone();
                 let id = RepositoryIdentifier::Remote(remote_id.clone());
                 if let Some(state) = RepoMetadataModel::as_ref(ctx).get_repository(&id, ctx) {
-                    if let Some(root_dir) = self.root_directories.get_mut(&repo_path) {
-                        root_dir.entry = state.entry.clone();
+                    let belongs_to_this_tree =
+                        self.root_directories
+                            .get(&repo_path)
+                            .is_some_and(|root_dir| {
+                                root_dir
+                                    .remote_host_id
+                                    .as_ref()
+                                    .is_some_and(|h| *h == remote_id.host_id)
+                            });
+                    if belongs_to_this_tree {
+                        if let Some(root_dir) = self.root_directories.get_mut(&repo_path) {
+                            root_dir.entry = state.entry.clone();
+                            self.rebuild_flattened_items();
+                            ctx.notify();
+                        }
                     }
-                    self.rebuild_flattened_items();
-                    ctx.notify();
                 }
             }
             RepoMetadataEvent::RepositoryRemoved {
                 id: RepositoryIdentifier::Remote(remote_id),
             } => {
                 let repo_path = &remote_id.path;
-                self.displayed_directories.retain(|p| p != repo_path);
-                self.root_directories.remove(repo_path);
-                self.rebuild_flattened_items();
-                ctx.notify();
+                let belongs_to_this_tree =
+                    self.root_directories.get(repo_path).is_some_and(|root_dir| {
+                        root_dir
+                            .remote_host_id
+                            .as_ref()
+                            .is_some_and(|h| *h == remote_id.host_id)
+                    });
+                if belongs_to_this_tree {
+                    self.displayed_directories.retain(|p| p != repo_path);
+                    self.root_directories.remove(repo_path);
+                    self.rebuild_flattened_items();
+                    ctx.notify();
+                }
             }
             RepoMetadataEvent::FileTreeUpdated { .. }
             | RepoMetadataEvent::RepositoryRemoved { .. }

@@ -940,16 +940,30 @@ impl LeftPanelView {
         #[cfg(feature = "local_fs")]
         {
             let repo_model = RepoMetadataModel::as_ref(ctx);
-            let remote_roots: Vec<_> = repo_model
-                .remote_repository_ids(ctx)
-                .filter(|remote_id| {
-                    repo_model.has_repository(
-                        &repo_metadata::RepositoryIdentifier::Remote((*remote_id).clone()),
-                        ctx,
-                    )
-                })
-                .cloned()
-                .collect();
+            let sftp_model = crate::ssh_manager::SftpBrowserModel::as_ref(ctx);
+            let mut remote_roots = Vec::new();
+            for remote_id in repo_model.remote_repository_ids(ctx) {
+                if !repo_model.has_repository(
+                    &repo_metadata::RepositoryIdentifier::Remote(remote_id.clone()),
+                    ctx,
+                ) {
+                    continue;
+                }
+
+                let is_managed = sftp_model.is_managed_host(&remote_id.host_id);
+                if let Some(existing) = remote_roots
+                    .iter_mut()
+                    .find(|existing| existing.path == remote_id.path)
+                {
+                    let existing_is_managed = sftp_model.is_managed_host(&existing.host_id);
+                    if is_managed && !existing_is_managed {
+                        *existing = remote_id.clone();
+                    }
+                    continue;
+                }
+
+                remote_roots.push(remote_id.clone());
+            }
             let enablement = CodingPanelEnablementState::RemoteSession {
                 has_remote_server: !remote_roots.is_empty(),
             };

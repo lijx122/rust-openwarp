@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use pathfinder_geometry::vector::Vector2F;
 use repo_metadata::{RepoMetadataModel, RepositoryIdentifier};
+use warp_core::HostId;
 use warp_core::ui::theme::{color::internal_colors, Fill};
 use warpui::elements::{
     AcceptedByDropTarget, Border, ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius,
@@ -269,22 +270,27 @@ impl SshManagerPanel {
         });
     }
 
-    fn connected_host_id(&self, ctx: &AppContext) -> Option<String> {
+    fn selected_file_tree_host_id(&self, ctx: &AppContext) -> Option<HostId> {
         let selected_id = self.selected_id.as_deref()?;
         let connection = SshConnectionModel::as_ref(ctx).connection_for_node(selected_id)?;
-        let host_id = connection.host_id.as_ref()?.as_str().to_owned();
 
-        matches!(
+        if !matches!(
             connection.state,
             SshConnectionState::Connected | SshConnectionState::Reconnecting
-        )
-        .then_some(host_id)
+        ) {
+            return None;
+        }
+
+        crate::ssh_manager::SftpBrowserModel::as_ref(ctx)
+            .managed_host_id_for_node(selected_id)
+            .or_else(|| connection.host_id.clone())
     }
 
     fn sync_selected_server_file_tree_state(&mut self, ctx: &mut ViewContext<Self>) {
         let remote_roots = self.collect_remote_root_directories(ctx);
         let enablement = CodingPanelEnablementState::RemoteSession {
-            has_remote_server: self.connected_host_id(ctx).is_some() && !remote_roots.is_empty(),
+            has_remote_server: self.selected_file_tree_host_id(ctx).is_some()
+                && !remote_roots.is_empty(),
         };
 
         self.file_tree_view.update(ctx, |view, ctx| {
@@ -307,14 +313,14 @@ impl SshManagerPanel {
         else {
             return Vec::new();
         };
-        let Some(host_id) = connection.host_id.as_ref() else {
+        let Some(host_id) = self.selected_file_tree_host_id(ctx) else {
             return Vec::new();
         };
 
         match connection.state {
             SshConnectionState::Connected | SshConnectionState::Reconnecting => available_repo_ids
                 .into_iter()
-                .filter(|remote_id| &remote_id.host_id == host_id)
+                .filter(|remote_id| remote_id.host_id == host_id)
                 .filter(|remote_id| {
                     repo_model.has_repository(&RepositoryIdentifier::Remote(remote_id.clone()), ctx)
                 })
@@ -864,11 +870,11 @@ impl SshManagerPanel {
         let selected_id = self.selected_id.as_deref();
         let connection =
             selected_id.and_then(|id| SshConnectionModel::as_ref(app).connection_for_node(id));
-        let current_host_id = connection.and_then(|connection| connection.host_id.as_ref());
         let current_state = connection.map(|connection| &connection.state);
         let remote_roots = self.collect_remote_root_directories(app);
-        let show_file_tree =
-            self.is_file_tree_active && current_host_id.is_some() && !remote_roots.is_empty();
+        let show_file_tree = self.is_file_tree_active
+            && self.selected_file_tree_host_id(app).is_some()
+            && !remote_roots.is_empty();
         let mut col = Flex::column();
 
         if self.nodes.is_empty() {

@@ -134,8 +134,44 @@ impl SshConnectionModel {
         self.node_connections.get(node_id)
     }
 
+    pub fn node_id_for_terminal_view(&self, terminal_view_id: EntityId) -> Option<&str> {
+        if let Some(node_id) = self.pending_terminal_to_node.get(&terminal_view_id) {
+            return Some(node_id);
+        }
+
+        self.node_connections
+            .iter()
+            .find_map(|(node_id, connection)| {
+                (connection.terminal_view_id == terminal_view_id).then_some(node_id.as_str())
+            })
+    }
+
     pub fn host_id_for_node(&self, node_id: &str) -> Option<&HostId> {
         self.node_connections.get(node_id)?.host_id.as_ref()
+    }
+
+    pub fn release_terminal_view(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ModelContext<Self>,
+    ) -> Option<String> {
+        let pending_node_id = self.pending_terminal_to_node.remove(&terminal_view_id);
+        let node_id = pending_node_id.or_else(|| {
+            self.node_connections
+                .iter()
+                .find_map(|(node_id, connection)| {
+                    (connection.terminal_view_id == terminal_view_id).then_some(node_id.clone())
+                })
+        })?;
+
+        if let Some(connection) = self.node_connections.remove(&node_id) {
+            if let Some(session_id) = connection.session_id {
+                self.session_to_node.remove(&session_id);
+            }
+        }
+
+        ctx.notify();
+        Some(node_id)
     }
 
     fn handle_remote_server_event(

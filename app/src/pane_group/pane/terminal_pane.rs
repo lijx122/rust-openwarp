@@ -275,12 +275,32 @@ impl PaneContent for TerminalPane {
         detach_type: DetachType,
         ctx: &mut ViewContext<PaneGroup>,
     ) {
+        let terminal_view = self.terminal_view(ctx);
+        let terminal_view_id = terminal_view.id();
+
+        if matches!(detach_type, DetachType::HiddenForClose | DetachType::Closed) {
+            let ssh_node_id = crate::ssh_manager::SshConnectionModel::as_ref(ctx)
+                .node_id_for_terminal_view(terminal_view_id)
+                .map(str::to_owned);
+
+            if let Some(node_id) = ssh_node_id {
+                terminal_view.update(ctx, |view, ctx| {
+                    view.shutdown_pty(ctx);
+                });
+                crate::ssh_manager::SshConnectionModel::handle(ctx).update(ctx, |model, ctx| {
+                    let _ = model.release_terminal_view(terminal_view_id, ctx);
+                });
+                crate::ssh_manager::SftpBrowserModel::handle(ctx).update(ctx, |model, ctx| {
+                    model.disconnect_node(&node_id, ctx);
+                });
+            }
+        }
+
         if matches!(detach_type, DetachType::Closed) {
             // Only immediately clear conversations and delete blocks if the session is being
             // permanently closed.
             BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, ctx| {
-                history_model
-                    .clear_conversations_in_terminal_view(self.terminal_view(ctx).id(), ctx);
+                history_model.clear_conversations_in_terminal_view(terminal_view_id, ctx);
             });
             self.delete_blocks(ctx);
         }
@@ -297,9 +317,6 @@ impl PaneContent for TerminalPane {
             });
             ctx.unsubscribe_to_view(&view);
         }
-
-        let terminal_view_id = self.terminal_view(ctx).id();
-
         // Clean up any active CLI agent session so its notification is removed.
         // Skip this for moves — the session is still running and will re-register in the new tab.
         if !matches!(detach_type, DetachType::Moved) {
