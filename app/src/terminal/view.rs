@@ -11195,6 +11195,17 @@ impl TerminalView {
             return;
         };
 
+        if let Some(node_id) = crate::ssh_manager::SshConnectionModel::as_ref(ctx)
+            .node_id_for_terminal_view(self.id())
+            .map(str::to_owned)
+        {
+            if let Some(socket_path) = session.ssh_socket_path().cloned() {
+                crate::ssh_manager::SftpBrowserModel::handle(ctx).update(ctx, |model, ctx| {
+                    model.attach_control_path(&node_id, socket_path.clone(), ctx);
+                });
+            }
+        }
+
         // Ensure that the new session's working directory and environment are persisted.
         ctx.dispatch_global_action("workspace:save_app", ());
 

@@ -976,6 +976,13 @@ impl Session {
         )
     }
 
+    pub fn ssh_socket_path(&self) -> Option<&PathBuf> {
+        match &self.info.is_legacy_ssh_session {
+            IsLegacySSHSession::Yes { socket_path } => Some(socket_path),
+            IsLegacySSHSession::No => None,
+        }
+    }
+
     pub fn is_subshell_or_ssh(&self) -> bool {
         matches!(self.session_type(), SessionType::WarpifiedRemote { .. })
             || self.is_legacy_ssh_session()

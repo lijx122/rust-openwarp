@@ -1,13 +1,13 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_io::Timer;
-use command::{r#async::Command, Output, Stdio};
+use command::{Output, Stdio, r#async::Command};
 use futures_lite::{future, io::AsyncWriteExt};
 use repo_metadata::file_tree_update::{
     DirectoryNodeMetadata, FileNodeMetadata, FileTreeEntryUpdate, RepoMetadataUpdate,
     RepoNodeMetadata,
 };
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tempfile::{Builder as TempFileBuilder, TempPath};
 use warp_core::HostId;
@@ -24,6 +24,7 @@ const SFTP_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 #[derive(Clone)]
 struct SftpHost {
     server: SshServerInfo,
+    control_path: Option<PathBuf>,
 }
 
 pub struct SftpBrowserModel {
@@ -37,11 +38,31 @@ impl SftpBrowserModel {
         }
     }
 
-    pub fn connect(&mut self, server: SshServerInfo, ctx: &mut ModelContext<Self>) {
+    pub fn connect(&mut self, server: SshServerInfo) {
         let node_id = server.node_id.clone();
         let host_id = Self::host_id_for_node(&node_id);
-        self.hosts.insert(host_id.clone(), SftpHost { server });
-        self.load_initial_root(node_id, host_id, ctx);
+        self.hosts.insert(
+            host_id,
+            SftpHost {
+                server,
+                control_path: None,
+            },
+        );
+    }
+
+    pub fn attach_control_path(
+        &mut self,
+        node_id: &str,
+        control_path: PathBuf,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let host_id = Self::host_id_for_node(node_id);
+        let Some(host) = self.hosts.get_mut(&host_id) else {
+            log::warn!("sftp attach_control_path missing host for node {node_id}");
+            return;
+        };
+        host.control_path = Some(control_path);
+        self.load_initial_root(node_id.to_string(), host_id, ctx);
     }
 
     pub fn is_managed_host(&self, host_id: &HostId) -> bool {
@@ -51,10 +72,6 @@ impl SftpBrowserModel {
     pub fn managed_host_id_for_node(&self, node_id: &str) -> Option<HostId> {
         let host_id = Self::host_id_for_node(node_id);
         self.hosts.contains_key(&host_id).then_some(host_id)
-    }
-
-    pub fn server_for_host(&self, host_id: &HostId) -> Option<SshServerInfo> {
-        self.hosts.get(host_id).map(|host| host.server.clone())
     }
 
     pub fn disconnect_node(&mut self, node_id: &str, ctx: &mut ModelContext<Self>) {
@@ -78,7 +95,7 @@ impl SftpBrowserModel {
         };
         let keepalive = SshSettings::as_ref(ctx).keepalive_options();
         ctx.spawn(
-            async move { run_sftp_batch(&host.server, &batch, SFTP_OPERATION_TIMEOUT, keepalive).await },
+            async move { run_batch_for_managed_host(host, batch, keepalive).await },
             on_complete,
         );
     }
@@ -95,15 +112,7 @@ impl SftpBrowserModel {
         };
         let keepalive = SshSettings::as_ref(ctx).keepalive_options();
         ctx.spawn(
-            async move {
-                run_ssh_command(
-                    &host.server,
-                    &remote_command,
-                    SFTP_OPERATION_TIMEOUT,
-                    keepalive,
-                )
-                .await
-            },
+            async move { run_command_for_managed_host(host, remote_command, keepalive).await },
             on_complete,
         );
     }
@@ -121,10 +130,9 @@ impl SftpBrowserModel {
         let keepalive = SshSettings::as_ref(ctx).keepalive_options();
         ctx.spawn(
             async move {
-                let output = run_sftp_batch(
-                    &host.server,
-                    &format!("ls -la {}\n", quote_sftp_path(dir_path.as_str())),
-                    SFTP_OPERATION_TIMEOUT,
+                let output = run_batch_for_managed_host(
+                    host,
+                    format!("ls -la {}\n", quote_sftp_path(dir_path.as_str())),
                     keepalive,
                 )
                 .await?;
@@ -159,10 +167,9 @@ impl SftpBrowserModel {
         let node_id_for_success = node_id.clone();
         ctx.spawn(
             async move {
-                let output = run_sftp_batch(
-                    &host.server,
-                    "pwd\nls -la .\n",
-                    SFTP_OPERATION_TIMEOUT,
+                let output = run_batch_for_managed_host(
+                    host,
+                    "realpath .\npwd\nls -la .\n".to_string(),
                     keepalive,
                 )
                 .await?;
@@ -173,7 +180,7 @@ impl SftpBrowserModel {
                     ));
                 }
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                let root = parse_remote_pwd(&stdout).unwrap_or_else(|| "/".to_string());
+                let root = parse_remote_root(&stdout).unwrap_or_else(|| "/".to_string());
                 let root_path =
                     StandardizedPath::try_with_encoding(&root, typed_path::PathType::Unix)
                         .with_context(|| format!("invalid remote root path: {root}"))?;
@@ -218,22 +225,6 @@ pub struct SftpEntry {
     is_dir: bool,
 }
 
-pub async fn run_sftp_batch_for_server(
-    server: SshServerInfo,
-    batch: String,
-    keepalive: remote_server::ssh::SshKeepaliveOptions,
-) -> Result<Output> {
-    run_sftp_batch(&server, &batch, SFTP_OPERATION_TIMEOUT, keepalive).await
-}
-
-pub async fn run_ssh_command_for_server(
-    server: SshServerInfo,
-    remote_command: String,
-    keepalive: remote_server::ssh::SshKeepaliveOptions,
-) -> Result<Output> {
-    run_ssh_command(&server, &remote_command, SFTP_OPERATION_TIMEOUT, keepalive).await
-}
-
 fn update_for_directory(
     repo_root: StandardizedPath,
     dir_path: StandardizedPath,
@@ -269,6 +260,48 @@ fn update_for_directory(
             subtree_metadata,
         }],
     }
+}
+
+async fn run_batch_for_managed_host(
+    host: SftpHost,
+    batch: String,
+    keepalive: remote_server::ssh::SshKeepaliveOptions,
+) -> Result<Output> {
+    if let Some(control_path) = host.control_path {
+        return remote_server::ssh::run_sftp_batch(
+            &control_path,
+            &batch,
+            SFTP_OPERATION_TIMEOUT,
+            &keepalive,
+        )
+        .await;
+    }
+
+    run_sftp_batch(&host.server, &batch, SFTP_OPERATION_TIMEOUT, keepalive).await
+}
+
+async fn run_command_for_managed_host(
+    host: SftpHost,
+    remote_command: String,
+    keepalive: remote_server::ssh::SshKeepaliveOptions,
+) -> Result<Output> {
+    if let Some(control_path) = host.control_path {
+        return remote_server::ssh::run_ssh_command_with_options(
+            &control_path,
+            &remote_command,
+            SFTP_OPERATION_TIMEOUT,
+            &keepalive,
+        )
+        .await;
+    }
+
+    run_ssh_command(
+        &host.server,
+        &remote_command,
+        SFTP_OPERATION_TIMEOUT,
+        keepalive,
+    )
+    .await
 }
 
 async fn run_sftp_batch(
@@ -527,6 +560,58 @@ fn parse_remote_pwd(output: &str) -> Option<String> {
     })
 }
 
+fn parse_remote_root(output: &str) -> Option<String> {
+    if let Some(path) = parse_realpath_output(output) {
+        return Some(path);
+    }
+
+    parse_remote_pwd(output)
+}
+
+fn parse_realpath_output(output: &str) -> Option<String> {
+    let mut after_realpath = false;
+
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if after_realpath {
+            if line.starts_with("sftp>")
+                || line.starts_with("Connected to ")
+                || line.starts_with("Remote working directory:")
+            {
+                after_realpath = false;
+                continue;
+            }
+
+            return Some(line.to_string());
+        }
+
+        if line.starts_with("sftp>") && line.contains("realpath .") {
+            after_realpath = true;
+            continue;
+        }
+
+        if line.starts_with("sftp>")
+            || line.starts_with("Connected to ")
+            || line.starts_with("Remote working directory:")
+            || line.starts_with("Changing to:")
+        {
+            continue;
+        }
+
+        let Some(first) = line.chars().next() else {
+            continue;
+        };
+        if !matches!(first, 'd' | '-' | 'l') {
+            return Some(line.to_string());
+        }
+    }
+
+    None
+}
+
 fn parse_sftp_ls(output: &str, parent: &StandardizedPath) -> Result<Vec<SftpEntry>> {
     let mut entries = Vec::new();
     for line in output
@@ -611,6 +696,14 @@ mod tests {
     fn parses_pwd() {
         assert_eq!(
             parse_remote_pwd("Remote working directory: /home/alice\n").as_deref(),
+            Some("/home/alice")
+        );
+    }
+
+    #[test]
+    fn parses_realpath_root() {
+        assert_eq!(
+            parse_remote_root("sftp> realpath .\n/home/alice\nsftp> ls -la .\n").as_deref(),
             Some("/home/alice")
         );
     }

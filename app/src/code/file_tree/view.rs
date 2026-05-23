@@ -2425,12 +2425,6 @@ impl FileTreeView {
                 );
             }
             RemoteActionBackend::SftpCli => {
-                let Some(server) = crate::ssh_manager::SftpBrowserModel::as_ref(ctx)
-                    .server_for_host(&target.host_id)
-                else {
-                    return;
-                };
-                let keepalive = crate::settings::SshSettings::as_ref(ctx).keepalive_options();
                 let batch = format!(
                     "get {} {}\n",
                     crate::ssh_manager::sftp_browser_model::quote_sftp_path(&remote_path),
@@ -2438,39 +2432,37 @@ impl FileTreeView {
                         &local_path.to_string_lossy()
                     )
                 );
-                let _ = ctx.spawn(
-                    async move {
-                        crate::ssh_manager::sftp_browser_model::run_sftp_batch_for_server(
-                            server, batch, keepalive,
-                        )
-                        .await
-                        .map(|output| (output, local_path))
-                    },
-                    move |_me, result, ctx| match result {
-                        Ok((output, path)) if output.status.success() => {
-                            if open_after_download {
-                                ctx.emit(FileTreeEvent::OpenFile {
-                                    path,
-                                    target: FileTarget::SystemDefault,
-                                    line_col: None,
-                                });
+                crate::ssh_manager::SftpBrowserModel::handle(ctx).update(ctx, move |model, ctx| {
+                    model.run_batch_for_host(
+                        target.host_id.clone(),
+                        batch,
+                        ctx,
+                        move |_, result, ctx| match result {
+                            Ok(output) if output.status.success() => {
+                                if open_after_download {
+                                    ctx.emit(FileTreeEvent::OpenFile {
+                                        path: local_path.clone(),
+                                        target: FileTarget::SystemDefault,
+                                        line_col: None,
+                                    });
+                                }
                             }
-                        }
-                        Ok((output, _)) => {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            Self::show_remote_error_toast(
-                                ctx,
-                                format!("Remote download failed: {stderr}"),
-                            );
-                        }
-                        Err(error) => {
-                            Self::show_remote_error_toast(
-                                ctx,
-                                format!("Remote download failed: {error:#}"),
-                            );
-                        }
-                    },
-                );
+                            Ok(output) => {
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                Self::show_remote_error_toast(
+                                    ctx,
+                                    format!("Remote download failed: {stderr}"),
+                                );
+                            }
+                            Err(error) => {
+                                Self::show_remote_error_toast(
+                                    ctx,
+                                    format!("Remote download failed: {error:#}"),
+                                );
+                            }
+                        },
+                    );
+                });
             }
         }
     }
@@ -2563,44 +2555,37 @@ impl FileTreeView {
                             );
                         }
                         RemoteActionBackend::SftpCli => {
-                            let Some(server) = crate::ssh_manager::SftpBrowserModel::as_ref(ctx)
-                                .server_for_host(&host_id)
-                            else {
-                                return;
-                            };
-                            let keepalive = crate::settings::SshSettings::as_ref(ctx)
-                                .keepalive_options();
-                            let _ = ctx.spawn(
-                                async move {
-                                    crate::ssh_manager::sftp_browser_model::run_sftp_batch_for_server(
-                                        server,
+                            crate::ssh_manager::SftpBrowserModel::handle(ctx).update(
+                                ctx,
+                                move |model, ctx| {
+                                    model.run_batch_for_host(
+                                        host_id.clone(),
                                         format!("{batch}\n"),
-                                        keepalive,
-                                    )
-                                    .await
-                                },
-                                move |me, result, ctx| match result {
-                                    Ok(output) if output.status.success() => {
-                                        me.refresh_remote_directory(
-                                            host_id.clone(),
-                                            repo_root.clone(),
-                                            refresh_dir.clone(),
-                                            ctx,
-                                        );
-                                    }
-                                    Ok(output) => {
-                                        let stderr = String::from_utf8_lossy(&output.stderr);
-                                        Self::show_remote_error_toast(
-                                            ctx,
-                                            format!("Remote upload failed: {stderr}"),
-                                        );
-                                    }
-                                    Err(error) => {
-                                        Self::show_remote_error_toast(
-                                            ctx,
-                                            format!("Remote upload failed: {error:#}"),
-                                        );
-                                    }
+                                        ctx,
+                                        move |me, result, ctx| match result {
+                                            Ok(output) if output.status.success() => {
+                                                me.refresh_remote_directory(
+                                                    host_id.clone(),
+                                                    repo_root.clone(),
+                                                    refresh_dir.clone(),
+                                                    ctx,
+                                                );
+                                            }
+                                            Ok(output) => {
+                                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                                Self::show_remote_error_toast(
+                                                    ctx,
+                                                    format!("Remote upload failed: {stderr}"),
+                                                );
+                                            }
+                                            Err(error) => {
+                                                Self::show_remote_error_toast(
+                                                    ctx,
+                                                    format!("Remote upload failed: {error:#}"),
+                                                );
+                                            }
+                                        },
+                                    );
                                 },
                             );
                         }
@@ -2677,37 +2662,30 @@ impl FileTreeView {
                 );
             }
             RemoteActionBackend::SftpCli => {
-                let Some(server) =
-                    crate::ssh_manager::SftpBrowserModel::as_ref(ctx).server_for_host(&host_id)
-                else {
-                    return;
-                };
-                let keepalive = crate::settings::SshSettings::as_ref(ctx).keepalive_options();
-                let _ = ctx.spawn(
-                    async move {
-                        crate::ssh_manager::sftp_browser_model::run_ssh_command_for_server(
-                            server, command, keepalive,
-                        )
-                        .await
-                    },
-                    move |me, result, ctx| match result {
-                        Ok(output) if output.status.success() => {
-                            me.refresh_remote_directory(
-                                host_id.clone(),
-                                repo_root.clone(),
-                                refresh_dir.clone(),
-                                ctx,
-                            );
-                        }
-                        Ok(output) => {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            Self::show_remote_error_toast(ctx, format!("远程删除失败: {stderr}"));
-                        }
-                        Err(error) => {
-                            Self::show_remote_error_toast(ctx, format!("远程删除失败: {error:#}"));
-                        }
-                    },
-                );
+                crate::ssh_manager::SftpBrowserModel::handle(ctx).update(ctx, move |model, ctx| {
+                    model.run_ssh_command_for_host(
+                        host_id.clone(),
+                        command,
+                        ctx,
+                        move |me, result, ctx| match result {
+                            Ok(output) if output.status.success() => {
+                                me.refresh_remote_directory(
+                                    host_id.clone(),
+                                    repo_root.clone(),
+                                    refresh_dir.clone(),
+                                    ctx,
+                                );
+                            }
+                            Ok(output) => {
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                Self::show_remote_error_toast(ctx, format!("远程删除失败: {stderr}"));
+                            }
+                            Err(error) => {
+                                Self::show_remote_error_toast(ctx, format!("远程删除失败: {error:#}"));
+                            }
+                        },
+                    );
+                });
             }
         }
     }

@@ -5329,8 +5329,8 @@ impl Workspace {
         crate::ssh_manager::SshConnectionModel::handle(ctx).update(ctx, |model, ctx| {
             model.start_connect(node_id.clone(), terminal_view.id(), ctx);
         });
-        crate::ssh_manager::SftpBrowserModel::handle(ctx).update(ctx, |model, ctx| {
-            model.connect(server.clone(), ctx);
+        crate::ssh_manager::SftpBrowserModel::handle(ctx).update(ctx, |model, _| {
+            model.connect(server.clone());
         });
 
         if AISettings::as_ref(ctx).default_session_mode(ctx) == DefaultSessionMode::Agent {
