@@ -272,9 +272,7 @@ async fn run_sftp_batch(
 
     let mut command = Command::new("sftp");
     command
-        .args(sftp_args(server, &keepalive))
-        .arg("-b")
-        .arg("-")
+        .args(build_sftp_command_args(server, &keepalive))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -351,7 +349,7 @@ async fn run_ssh_command(
     .await
 }
 
-fn sftp_args(
+fn sftp_option_args(
     server: &SshServerInfo,
     keepalive: &remote_server::ssh::SshKeepaliveOptions,
 ) -> Vec<String> {
@@ -392,11 +390,6 @@ fn sftp_args(
             }
         }
     }
-    args.push(if server.username.is_empty() {
-        server.host.clone()
-    } else {
-        format!("{}@{}", server.username, server.host)
-    });
     args
 }
 
@@ -441,12 +434,27 @@ fn ssh_args(
             }
         }
     }
-    args.push(if server.username.is_empty() {
+    args.push(server_destination(server));
+    args
+}
+
+fn build_sftp_command_args(
+    server: &SshServerInfo,
+    keepalive: &remote_server::ssh::SshKeepaliveOptions,
+) -> Vec<String> {
+    let mut args = sftp_option_args(server, keepalive);
+    args.push("-b".to_string());
+    args.push("-".to_string());
+    args.push(server_destination(server));
+    args
+}
+
+fn server_destination(server: &SshServerInfo) -> String {
+    if server.username.is_empty() {
         server.host.clone()
     } else {
         format!("{}@{}", server.username, server.host)
-    });
-    args
+    }
 }
 
 fn read_secret(server: &SshServerInfo) -> Option<String> {
@@ -567,9 +575,22 @@ pub fn quote_sftp_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use remote_server::ssh::SshKeepaliveOptions;
 
     fn std_path(path: &str) -> StandardizedPath {
         StandardizedPath::try_with_encoding(path, typed_path::PathType::Unix).unwrap()
+    }
+
+    fn server() -> SshServerInfo {
+        SshServerInfo {
+            node_id: "node-1".into(),
+            host: "example.com".into(),
+            port: 2222,
+            username: "alice".into(),
+            auth_type: AuthType::Password,
+            key_path: None,
+            last_connected_at: None,
+        }
     }
 
     #[test]
@@ -594,5 +615,40 @@ lrwxrwxrwx    1 alice users           3 May 22 10:00 link -> src
         assert_eq!(entries[1].path.as_str(), "/home/alice/README.md");
         assert!(!entries[1].is_dir);
         assert_eq!(entries[2].path.as_str(), "/home/alice/link");
+    }
+
+    #[test]
+    fn builds_sftp_command_with_destination_last() {
+        let args = build_sftp_command_args(
+            &server(),
+            &SshKeepaliveOptions {
+                server_alive_interval_secs: Some(30),
+                server_alive_count_max: Some(3),
+                tcp_keepalive_enabled: Some(true),
+            },
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "-o",
+                "BatchMode=no",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "ConnectTimeout=15",
+                "-o",
+                "ServerAliveInterval=30",
+                "-o",
+                "ServerAliveCountMax=3",
+                "-o",
+                "TCPKeepAlive=yes",
+                "-P",
+                "2222",
+                "-b",
+                "-",
+                "alice@example.com",
+            ]
+        );
     }
 }
