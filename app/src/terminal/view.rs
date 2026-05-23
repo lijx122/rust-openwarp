@@ -3893,7 +3893,11 @@ impl TerminalView {
                         // loading footer re-renders with the updated message.
                         ctx.notify();
                     }
-                    RemoteServerManagerEvent::SessionConnected { session_id, .. } => {
+                    RemoteServerManagerEvent::SessionConnected {
+                        session_id,
+                        host_id,
+                    } => {
+                        me.attach_managed_sftp_control_path(Some(host_id), ctx);
                         me.model.lock().event_proxy.send_terminal_event(
                             crate::terminal::event::Event::RemoteServerReady {
                                 session_id: *session_id,
@@ -4106,14 +4110,15 @@ impl TerminalView {
                             }));
                         }
                     }
-                    RemoteServerManagerEvent::SessionConnecting { .. }
-                    | RemoteServerManagerEvent::SessionReconnectStarted { .. }
-                    | RemoteServerManagerEvent::SessionReconnected { .. }
+                    RemoteServerManagerEvent::SessionReconnectStarted { .. }
                     | RemoteServerManagerEvent::HostConnected { .. }
                     | RemoteServerManagerEvent::HostDisconnected { .. }
                     | RemoteServerManagerEvent::RepoMetadataSnapshot { .. }
                     | RemoteServerManagerEvent::RepoMetadataUpdated { .. }
                     | RemoteServerManagerEvent::RepoMetadataDirectoryLoaded { .. } => {}
+                    RemoteServerManagerEvent::SessionReconnected { host_id, .. } => {
+                        me.attach_managed_sftp_control_path(Some(host_id), ctx);
+                    }
                 }
             });
         }
@@ -11173,6 +11178,48 @@ impl TerminalView {
 
     /// Handles a session in this terminal pane completing the bootstrapping
     /// process.
+    #[cfg(not(target_family = "wasm"))]
+    fn attach_managed_sftp_control_path(
+        &self,
+        host_id: Option<&warp_core::HostId>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(node_id) = crate::ssh_manager::SshConnectionModel::as_ref(ctx)
+            .node_id_for_terminal_view(self.id())
+            .map(str::to_owned)
+        else {
+            return;
+        };
+
+        let host_id = host_id.cloned().or_else(|| {
+            crate::ssh_manager::SshConnectionModel::as_ref(ctx)
+                .host_id_for_node(&node_id)
+                .cloned()
+        });
+        let Some(host_id) = host_id else {
+            return;
+        };
+
+        let Some(control_path) = RemoteServerManager::as_ref(ctx).control_path_for_host(&host_id)
+        else {
+            return;
+        };
+
+        crate::ssh_manager::SftpBrowserModel::handle(ctx).update(ctx, |model, ctx| {
+            model.attach_control_path(&node_id, control_path.clone(), ctx);
+        });
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn attach_managed_sftp_control_path(
+        &self,
+        host_id: Option<&warp_core::HostId>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let _ = host_id;
+        let _ = ctx;
+    }
+
     fn handle_session_bootstrapped(
         &mut self,
         bootstrap_event: SessionBootstrappedEvent,
@@ -11195,16 +11242,7 @@ impl TerminalView {
             return;
         };
 
-        if let Some(node_id) = crate::ssh_manager::SshConnectionModel::as_ref(ctx)
-            .node_id_for_terminal_view(self.id())
-            .map(str::to_owned)
-        {
-            if let Some(socket_path) = session.ssh_socket_path().cloned() {
-                crate::ssh_manager::SftpBrowserModel::handle(ctx).update(ctx, |model, ctx| {
-                    model.attach_control_path(&node_id, socket_path.clone(), ctx);
-                });
-            }
-        }
+        self.attach_managed_sftp_control_path(None, ctx);
 
         // Ensure that the new session's working directory and environment are persisted.
         ctx.dispatch_global_action("workspace:save_app", ());
