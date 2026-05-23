@@ -4110,7 +4110,8 @@ impl TerminalView {
                             }));
                         }
                     }
-                    RemoteServerManagerEvent::SessionReconnectStarted { .. }
+                    RemoteServerManagerEvent::SessionConnecting { .. }
+                    | RemoteServerManagerEvent::SessionReconnectStarted { .. }
                     | RemoteServerManagerEvent::HostConnected { .. }
                     | RemoteServerManagerEvent::HostDisconnected { .. }
                     | RemoteServerManagerEvent::RepoMetadataSnapshot { .. }
