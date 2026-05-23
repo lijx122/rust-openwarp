@@ -939,8 +939,15 @@ impl LeftPanelView {
     fn sync_remote_file_tree_roots(&mut self, ctx: &mut ViewContext<Self>) {
         #[cfg(feature = "local_fs")]
         {
-            let remote_roots: Vec<_> = RepoMetadataModel::as_ref(ctx)
+            let repo_model = RepoMetadataModel::as_ref(ctx);
+            let remote_roots: Vec<_> = repo_model
                 .remote_repository_ids(ctx)
+                .filter(|remote_id| {
+                    repo_model.has_repository(
+                        &repo_metadata::RepositoryIdentifier::Remote((*remote_id).clone()),
+                        ctx,
+                    )
+                })
                 .cloned()
                 .collect();
             let enablement = CodingPanelEnablementState::RemoteSession {

@@ -47,7 +47,7 @@ impl FileTreeItem {
                     .path
                     .file_name()
                     .map(ToOwned::to_owned)
-                    .unwrap_or_else(|| String::from("Folder"));
+                    .unwrap_or_else(|| directory.path.as_str().to_string());
                 RenderState {
                     display_name,
                     icon: ImageOrIcon::Icon(Icon::Folder),

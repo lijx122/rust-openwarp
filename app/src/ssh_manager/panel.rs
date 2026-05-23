@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use pathfinder_geometry::vector::Vector2F;
-use repo_metadata::RepoMetadataModel;
+use repo_metadata::{RepoMetadataModel, RepositoryIdentifier};
 use warp_core::ui::theme::{color::internal_colors, Fill};
 use warpui::elements::{
     AcceptedByDropTarget, Border, ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius,
@@ -315,6 +315,9 @@ impl SshManagerPanel {
             SshConnectionState::Connected | SshConnectionState::Reconnecting => available_repo_ids
                 .into_iter()
                 .filter(|remote_id| &remote_id.host_id == host_id)
+                .filter(|remote_id| {
+                    repo_model.has_repository(&RepositoryIdentifier::Remote(remote_id.clone()), ctx)
+                })
                 .collect(),
             SshConnectionState::Disconnected
             | SshConnectionState::Connecting
@@ -410,6 +413,19 @@ impl SshManagerPanel {
     fn dispatch_connect_for(&self, id: &str, ctx: &mut ViewContext<Self>) {
         let kind = self.nodes.iter().find(|n| n.id == id).map(|n| n.kind);
         if !matches!(kind, Some(NodeKind::Server)) {
+            return;
+        }
+        if SshConnectionModel::as_ref(ctx)
+            .connection_for_node(id)
+            .is_some_and(|connection| {
+                matches!(
+                    connection.state,
+                    SshConnectionState::Connecting
+                        | SshConnectionState::Connected
+                        | SshConnectionState::Reconnecting
+                )
+            })
+        {
             return;
         }
         let server = warp_ssh_manager::with_conn(|c| Ok(SshRepository::get_server(c, id)?))
@@ -855,13 +871,6 @@ impl SshManagerPanel {
             self.is_file_tree_active && current_host_id.is_some() && !remote_roots.is_empty();
         let mut col = Flex::column();
 
-        if show_file_tree {
-            let file_tree = Container::new(ChildView::new(&self.file_tree_view).finish())
-                .with_padding_bottom(8.0)
-                .finish();
-            col.add_child(file_tree);
-        }
-
         if self.nodes.is_empty() {
             let theme = appearance.theme();
             let muted = theme.sub_text_color(theme.background());
@@ -887,6 +896,29 @@ impl SshManagerPanel {
                     continue;
                 }
                 col.add_child(self.render_row(node, appearance, app));
+                let is_selected_connected_server = show_file_tree
+                    && selected_id == Some(node.id.as_str())
+                    && matches!(node.kind, NodeKind::Server)
+                    && matches!(
+                        current_state,
+                        Some(SshConnectionState::Connected | SshConnectionState::Reconnecting)
+                    );
+                if is_selected_connected_server {
+                    let depth = self.depths.get(&node.id).copied().unwrap_or(0);
+                    let nested_tree_indent = depth as f32 * FOLDER_DEPTH_INDENT
+                        + ITEM_ICON_SIZE * 2.0
+                        + ITEM_ICON_TEXT_SPACING * 2.0;
+                    let file_tree = Container::new(
+                        ConstrainedBox::new(ChildView::new(&self.file_tree_view).finish())
+                            .with_max_height(280.0)
+                            .finish(),
+                    )
+                    .with_padding_left(nested_tree_indent)
+                    .with_padding_top(4.0)
+                    .with_padding_bottom(8.0)
+                    .finish();
+                    col.add_child(file_tree);
+                }
             }
         }
         let inner = col
@@ -1282,11 +1314,11 @@ impl View for SshManagerPanel {
 
         // 让 tree 占满剩余垂直空间 — 这样 root DropTarget 覆盖到 panel 底部,
         // 用户在树最底下空白处拖也能落到 root(`SshDropData{parent_id:None}`)。
-        let tree_filled = warpui::elements::Shrinkable::new(1.0, tree).finish();
+        let tree_filled = tree;
 
         let panel_content = Container::new(
             Flex::column()
-                .with_main_axis_size(MainAxisSize::Max)
+                .with_main_axis_size(MainAxisSize::Min)
                 .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
                 .with_child(toolbar)
                 .with_child(tree_filled)
