@@ -56,6 +56,11 @@ impl SshConnectionModel {
         terminal_view_id: EntityId,
         ctx: &mut ModelContext<Self>,
     ) {
+        tracing::info!(
+            node_id = %node_id,
+            ?terminal_view_id,
+            "ssh manager connection started"
+        );
         self.pending_terminal_to_node
             .insert(terminal_view_id, node_id.clone());
         self.node_connections.insert(
@@ -71,6 +76,54 @@ impl SshConnectionModel {
         ctx.notify();
     }
 
+    pub fn mark_terminal_shell_connected(
+        &mut self,
+        terminal_view_id: EntityId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let Some(node_id) = self
+            .node_id_for_terminal_view(terminal_view_id)
+            .map(str::to_owned)
+        else {
+            tracing::info!(
+                ?terminal_view_id,
+                "ssh shell connected but no ssh-manager node is bound to this terminal"
+            );
+            return;
+        };
+
+        let Some(connection) = self.node_connections.get_mut(&node_id) else {
+            tracing::warn!(
+                ?terminal_view_id,
+                node_id = %node_id,
+                "ssh shell connected but ssh-manager connection is missing"
+            );
+            return;
+        };
+
+        if matches!(
+            connection.state,
+            SshConnectionState::Connected | SshConnectionState::Reconnecting
+        ) {
+            tracing::info!(
+                ?terminal_view_id,
+                node_id = %node_id,
+                previous_state = ?connection.state,
+                "ssh shell connected notification received but state was already ready"
+            );
+            return;
+        }
+
+        tracing::info!(
+            ?terminal_view_id,
+            node_id = %node_id,
+            previous_state = ?connection.state,
+            "ssh shell login completed; marking ssh manager row connected"
+        );
+        connection.state = SshConnectionState::Connected;
+        ctx.notify();
+    }
+
     pub fn mark_connected_with_host_id(
         &mut self,
         node_id: String,
@@ -81,6 +134,12 @@ impl SshConnectionModel {
             log::warn!("ssh connection missing for node {node_id} while marking connected");
             return;
         };
+        tracing::info!(
+            node_id = %node_id,
+            ?host_id,
+            previous_state = ?connection.state,
+            "ssh remote features became ready for node"
+        );
         connection.host_id = Some(host_id);
         connection.state = SshConnectionState::Connected;
         ctx.notify();
@@ -108,6 +167,12 @@ impl SshConnectionModel {
         let host_id = RemoteServerManager::as_ref(ctx)
             .host_id_for_session(session_id)
             .cloned();
+        tracing::info!(
+            ?terminal_view_id,
+            ?session_id,
+            has_host_id = host_id.is_some(),
+            "ssh manager bound terminal session"
+        );
         self.session_to_node.insert(session_id, node_id.clone());
         let connection = self
             .node_connections

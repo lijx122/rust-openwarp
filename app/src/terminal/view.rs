@@ -22433,11 +22433,25 @@ impl TerminalView {
             }
             SshLoginStatus::ReadyToWarpify => {
                 // After the confirmation check, we are confident enough to auto-warpify or offer warpification.
+                let terminal_view_id = self.id();
+                let pending_ssh_host = self.warpify_state.get_pending_ssh_host();
+                let has_pending_ssh_command = self.warpify_state.get_pending_ssh_command().is_some();
+                let auto_warpify_ssh_after_login = self.auto_warpify_ssh_after_login;
+                tracing::info!(
+                    ?terminal_view_id,
+                    pending_ssh_host = ?pending_ssh_host,
+                    has_pending_ssh_command,
+                    auto_warpify_ssh_after_login,
+                    "ssh login reached ReadyToWarpify"
+                );
+                crate::ssh_manager::SshConnectionModel::handle(ctx).update(ctx, |model, ctx| {
+                    model.mark_terminal_shell_connected(terminal_view_id, ctx);
+                });
+
                 let Some(command) = &self.warpify_state.get_pending_ssh_command() else {
                     return;
                 };
-                let ssh_host = &self.warpify_state.get_pending_ssh_host();
-                let auto_warpify_ssh_after_login = self.auto_warpify_ssh_after_login;
+                let ssh_host = &pending_ssh_host;
                 self.auto_warpify_ssh_after_login = false;
 
                 let shell_family = self.shell_family(ctx);
